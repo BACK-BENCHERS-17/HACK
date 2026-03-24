@@ -400,6 +400,60 @@ class DatabaseManager:
             conn.close()
             return True, "Success", reward
 
+    def get_all_promos(self) -> List[dict]:
+        conn = self.get_connection()
+        res = conn.execute("SELECT * FROM promo_codes ORDER BY created_at DESC").fetchall()
+        conn.close()
+        return [dict(r) for r in res]
+
+    def delete_promo(self, code: str):
+        with self.lock:
+            conn = self.get_connection()
+            conn.execute("DELETE FROM promo_codes WHERE code=?", (code,))
+            conn.execute("DELETE FROM redeemed_promos WHERE code=?", (code,))
+            conn.commit()
+            conn.close()
+
+    def get_unsold_keys_for_plan(self, plan_id: int, limit: int = 10, offset: int = 0) -> List[dict]:
+        conn = self.get_connection()
+        res = conn.execute("SELECT * FROM keys WHERE plan_id=? AND is_sold=0 ORDER BY id ASC LIMIT ? OFFSET ?", (plan_id, limit, offset)).fetchall()
+        conn.close()
+        return [dict(r) for r in res]
+
+    def get_unsold_keys_count_for_plan(self, plan_id: int) -> int:
+        conn = self.get_connection()
+        count = conn.execute("SELECT COUNT(*) FROM keys WHERE plan_id=? AND is_sold=0", (plan_id,)).fetchone()[0]
+        conn.close()
+        return count
+
+    def delete_unsold_keys_for_plan(self, plan_id: int) -> int:
+        with self.lock:
+            conn = self.get_connection()
+            count = conn.execute("SELECT COUNT(*) FROM keys WHERE plan_id=? AND is_sold=0", (plan_id,)).fetchone()[0]
+            conn.execute("DELETE FROM keys WHERE plan_id=? AND is_sold=0", (plan_id,))
+            conn.commit()
+            conn.close()
+            return count
+
+    def delete_single_key(self, key_id: int):
+        with self.lock:
+            conn = self.get_connection()
+            conn.execute("DELETE FROM keys WHERE id=? AND is_sold=0", (key_id,))
+            conn.commit()
+            conn.close()
+
+    def get_all_users_list(self, offset: int = 0, limit: int = 8) -> List[dict]:
+        conn = self.get_connection()
+        res = conn.execute("SELECT user_id, first_name, username, balance, is_banned, total_spent, joined_date FROM users WHERE verified=1 ORDER BY joined_date DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+        conn.close()
+        return [dict(r) for r in res]
+
+    def get_all_users_total(self) -> int:
+        conn = self.get_connection()
+        count = conn.execute("SELECT COUNT(*) FROM users WHERE verified=1").fetchone()[0]
+        conn.close()
+        return count
+
     def get_leaderboard(self) -> List[dict]:
         conn = self.get_connection()
         res = conn.execute("SELECT first_name, total_spent FROM users WHERE verified=1 AND total_spent > 0 ORDER BY total_spent DESC LIMIT 10").fetchall()
@@ -1492,36 +1546,300 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # --- Key Management ---
         elif data == "admin_keys":
             await query.answer()
-            prods = db.get_active_products()
-            text = f"<blockquote><b>{ce('key')} MANAGE KEYS</b></blockquote>\nSelect a product to add bulk keys."
-            buttons = [[InlineKeyboardButton(p['name'], callback_data=f"adm_kprod_{p['id']}")] for p in prods]
+            prods = db.get_all_products()
+            text = f"<blockquote><b>{ce('key')} MANAGE KEYS</b></blockquote>\n<i>Select a product to manage its keys.</i>"
+            buttons = [[InlineKeyboardButton(f"{ce_button('game')} {p['name']}", callback_data=f"adm_kprod_{p['id']}")] for p in prods]
             buttons.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_main")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data.startswith("adm_kprod_"):
             await query.answer()
             p_id = int(data.split("_")[2])
+            prod = db.get_product(p_id)
             plans = db.get_plans(p_id)
-            text = f"<blockquote><b>{ce('key')} SELECT PLAN TO ADD KEYS</b></blockquote>"
-            buttons = [[InlineKeyboardButton(pl['duration'], callback_data=f"adm_kplan_{pl['id']}")] for pl in plans]
+            text = f"<blockquote><b>{ce('key')} {prod.get('name','Product')} — KEY PLANS</b></blockquote>\n<i>Add or manage keys per plan.</i>"
+            buttons = []
+            for pl in plans:
+                cnt = db.get_unsold_keys_count_for_plan(pl['id'])
+                buttons.append([
+                    InlineKeyboardButton(f"{ce_button('plus')} Add | {pl['duration']} [{cnt} left]", callback_data=f"adm_kplan_{pl['id']}"),
+                    InlineKeyboardButton(f"{ce_button('search')} View", callback_data=f"adm_viewkeys_{pl['id']}_0"),
+                    InlineKeyboardButton(f"{ce_button('fail')} Clear", callback_data=f"adm_clearkeys_{pl['id']}")
+                ])
             buttons.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_keys")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("adm_viewkeys_"):
+            await query.answer()
+            parts = data.split("_")
+            pl_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 0
+            limit = 8
+            offset = page * limit
+            plan = db.get_plan(pl_id)
+            keys = db.get_unsold_keys_for_plan(pl_id, limit, offset)
+            total = db.get_unsold_keys_count_for_plan(pl_id)
+            total_pages = max(1, math.ceil(total / limit))
+            text = (
+                f"<blockquote><b>{ce('key')} KEYS — {plan.get('product_name','?')} | {plan.get('duration','?')}</b></blockquote>\n"
+                f"<i>Showing unsold keys. Click to delete individual key.</i>\n"
+                f"<b>Total unsold: {total}</b>\n{get_line(12)}\n"
+            )
+            for k in keys:
+                text += f"<code>{k['key_value']}</code>\n"
+            buttons_rows = []
+            for k in keys:
+                buttons_rows.append([InlineKeyboardButton(f"{ce_button('fail')} Del: {k['key_value'][:20]}...", callback_data=f"adm_delkey_{k['id']}_{pl_id}")])
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton(f"{ce_button('left')} Prev", callback_data=f"adm_viewkeys_{pl_id}_{page-1}"))
+            nav.append(InlineKeyboardButton(f"Pg {page+1}/{total_pages}", callback_data="ignore"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton(f"Next {ce_button('right')}", callback_data=f"adm_viewkeys_{pl_id}_{page+1}"))
+            if nav:
+                buttons_rows.append(nav)
+            buttons_rows.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data=f"adm_kprod_{plan.get('product_id',0)}")])
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons_rows))
+
+        elif data.startswith("adm_delkey_"):
+            parts = data.split("_")
+            key_id = int(parts[2])
+            pl_id = int(parts[3])
+            db.delete_single_key(key_id)
+            db.log_admin_action(user_id, "Deleted Key", f"KeyID: {key_id}")
+            await query.answer("Key deleted!", show_alert=False)
+            page = 0
+            plan = db.get_plan(pl_id)
+            keys = db.get_unsold_keys_for_plan(pl_id, 8, 0)
+            total = db.get_unsold_keys_count_for_plan(pl_id)
+            total_pages = max(1, math.ceil(total / 8))
+            text = (
+                f"<blockquote><b>{ce('key')} KEYS — {plan.get('product_name','?')} | {plan.get('duration','?')}</b></blockquote>\n"
+                f"<i>Key deleted. Remaining unsold: <b>{total}</b></i>\n{get_line(12)}\n"
+            )
+            for k in keys:
+                text += f"<code>{k['key_value']}</code>\n"
+            buttons_rows = []
+            for k in keys:
+                buttons_rows.append([InlineKeyboardButton(f"{ce_button('fail')} Del: {k['key_value'][:20]}...", callback_data=f"adm_delkey_{k['id']}_{pl_id}")])
+            if total_pages > 1:
+                buttons_rows.append([InlineKeyboardButton(f"Pg 1/{total_pages}", callback_data="ignore"), InlineKeyboardButton(f"Next {ce_button('right')}", callback_data=f"adm_viewkeys_{pl_id}_1")])
+            buttons_rows.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data=f"adm_kprod_{plan.get('product_id',0)}")])
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons_rows))
+
+        elif data.startswith("adm_clearkeys_"):
+            await query.answer()
+            pl_id = int(data.split("_")[2])
+            plan = db.get_plan(pl_id)
+            cnt = db.get_unsold_keys_count_for_plan(pl_id)
+            text = (
+                f"<blockquote><b>{ce('warning')} CLEAR ALL UNSOLD KEYS?</b></blockquote>\n\n"
+                f"Plan: <b>{plan.get('product_name','?')} — {plan.get('duration','?')}</b>\n"
+                f"This will delete <b>{cnt}</b> unsold keys. This cannot be undone!"
+            )
+            buttons = [
+                [InlineKeyboardButton(f"{ce_button('fail')} Yes, Clear All {cnt} Keys", callback_data=f"adm_confirmclear_{pl_id}")],
+                [InlineKeyboardButton(f"{ce_button('back')} Cancel", callback_data=f"adm_kprod_{plan.get('product_id',0)}")]
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("adm_confirmclear_"):
+            pl_id = int(data.split("_")[2])
+            plan = db.get_plan(pl_id)
+            deleted = db.delete_unsold_keys_for_plan(pl_id)
+            db.log_admin_action(user_id, "Cleared All Keys", f"PlanID: {pl_id}, Count: {deleted}")
+            await query.answer(f"Cleared {deleted} keys!", show_alert=True)
+            await safe_edit_text(update, context, f"<blockquote>{ce('success')} <b>Cleared {deleted} unsold keys successfully.</b></blockquote>", back_kb(f"adm_kprod_{plan.get('product_id',0)}"))
 
         # --- Promo Codes Management ---
         elif data == "admin_promos":
             await query.answer()
-            text = f"<blockquote><b>{ce('promo')} PROMO CODES MANAGEMENT</b></blockquote>\n\nGenerate limited usage promo codes for your users!"
-            buttons = [[InlineKeyboardButton(f"{ce_button('plus')} Create Promo Code", callback_data="adm_create_promo")],[InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_main")]
+            promos = db.get_all_promos()
+            text = f"<blockquote><b>{ce('promo')} PROMO CODES</b></blockquote>\n<i>Click a promo to delete it.</i>\n{get_line(12)}\n"
+            buttons = []
+            if promos:
+                for pr in promos:
+                    used = pr['current_uses']
+                    maxi = pr['max_uses']
+                    reward = pr['reward_paise'] / 100
+                    buttons.append([InlineKeyboardButton(
+                        f"{ce_button('fail')} {pr['code']} | ₹{reward:.0f} | {used}/{maxi} uses",
+                        callback_data=f"adm_del_promo_{pr['code']}"
+                    )])
+                    text += f"{ce('promo')} <code>{pr['code']}</code> — ₹{reward:.0f} — {used}/{maxi} uses\n"
+            else:
+                text += "<i>No promo codes yet. Create one below!</i>"
+            buttons.append([InlineKeyboardButton(f"{ce_button('plus')} Create New Promo Code", callback_data="adm_create_promo")])
+            buttons.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_main")])
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("adm_del_promo_"):
+            await query.answer()
+            code = data[len("adm_del_promo_"):]
+            text = (
+                f"<blockquote><b>{ce('warning')} DELETE PROMO CODE?</b></blockquote>\n\n"
+                f"Code: <code>{code}</code>\n"
+                f"<i>This will remove the promo and all redemption records.</i>"
+            )
+            buttons = [
+                [InlineKeyboardButton(f"{ce_button('fail')} Yes, Delete", callback_data=f"adm_confirm_del_promo_{code}")],
+                [InlineKeyboardButton(f"{ce_button('back')} Cancel", callback_data="admin_promos")]
             ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("adm_confirm_del_promo_"):
+            code = data[len("adm_confirm_del_promo_"):]
+            db.delete_promo(code)
+            db.log_admin_action(user_id, "Deleted Promo", f"Code: {code}")
+            await query.answer("Promo deleted!", show_alert=True)
+            promos = db.get_all_promos()
+            text = f"<blockquote>{ce('success')} <b>Promo <code>{code}</code> deleted!</b></blockquote>\n{get_line(12)}\n"
+            buttons = []
+            for pr in promos:
+                used = pr['current_uses']
+                maxi = pr['max_uses']
+                reward = pr['reward_paise'] / 100
+                buttons.append([InlineKeyboardButton(f"{ce_button('fail')} {pr['code']} | ₹{reward:.0f} | {used}/{maxi} uses", callback_data=f"adm_del_promo_{pr['code']}")])
+                text += f"{ce('promo')} <code>{pr['code']}</code> — ₹{reward:.0f} — {used}/{maxi} uses\n"
+            if not promos:
+                text += "<i>No promo codes remaining.</i>"
+            buttons.append([InlineKeyboardButton(f"{ce_button('plus')} Create New Promo Code", callback_data="adm_create_promo")])
+            buttons.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_main")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         # --- User Management ---
         elif data == "admin_users":
             await query.answer()
-            text = f"<blockquote><b>{ce('user')} USER MANAGEMENT</b></blockquote>\n\nChoose an action below:"
-            buttons =[[InlineKeyboardButton(f"{ce_button('money')} Add Manual Balance", callback_data="adm_add_bal")],[InlineKeyboardButton(f"{ce_button('fail')} Ban User", callback_data="adm_ban_usr"), InlineKeyboardButton(f"{ce_button('success')} Unban User", callback_data="adm_unban_usr")],[InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_main")]
+            total = db.get_all_users_total()
+            text = f"<blockquote><b>{ce('user')} USER MANAGEMENT</b></blockquote>\n<b>Total Verified Users: {total}</b>\n{get_line(12)}\nChoose an action:"
+            buttons = [
+                [InlineKeyboardButton(f"{ce_button('search')} Browse All Users", callback_data="adm_browse_users_0")],
+                [InlineKeyboardButton(f"{ce_button('money')} Add Balance", callback_data="adm_add_bal"),
+                 InlineKeyboardButton(f"{ce_button('fail')} Ban User", callback_data="adm_ban_usr"),
+                 InlineKeyboardButton(f"{ce_button('success')} Unban", callback_data="adm_unban_usr")],
+                [InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_main")]
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("adm_browse_users_"):
+            await query.answer()
+            page = int(data.split("_")[3])
+            limit = 8
+            offset = page * limit
+            users = db.get_all_users_list(offset, limit)
+            total = db.get_all_users_total()
+            total_pages = max(1, math.ceil(total / limit))
+            text = (
+                f"<blockquote><b>{ce('user')} ALL USERS — Page {page+1}/{total_pages}</b></blockquote>\n"
+                f"<i>Click a user to view details & actions.</i>\n{get_line(12)}\n"
+            )
+            buttons = []
+            for u in users:
+                ban_icon = ce_button('fail') if u['is_banned'] else ce_button('success')
+                uname = f"@{u['username']}" if u['username'] else f"ID:{u['user_id']}"
+                buttons.append([InlineKeyboardButton(
+                    f"{ban_icon} {u['first_name']} | {uname} | ₹{u['balance']/100:.0f}",
+                    callback_data=f"adm_user_detail_{u['user_id']}"
+                )])
+                text += f"{ban_icon} <b>{u['first_name']}</b> ({uname}) — ₹{u['balance']/100:.0f}\n"
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton(f"{ce_button('left')} Prev", callback_data=f"adm_browse_users_{page-1}"))
+            nav.append(InlineKeyboardButton(f"Pg {page+1}/{total_pages}", callback_data="ignore"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton(f"Next {ce_button('right')}", callback_data=f"adm_browse_users_{page+1}"))
+            if nav:
+                buttons.append(nav)
+            buttons.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_users")])
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("adm_user_detail_"):
+            await query.answer()
+            uid = int(data.split("_")[3])
+            u = db.get_user(uid)
+            if not u:
+                await safe_edit_text(update, context, f"<blockquote>{ce('fail')} User not found.</blockquote>", back_kb("admin_users"))
+                return
+            keys_count = db.get_user_keys_count(uid)
+            ban_status = f"{ce('fail')} BANNED" if u.get('is_banned') else f"{ce('success')} ACTIVE"
+            text = (
+                f"<blockquote><b>{ce('user')} USER DETAILS</b></blockquote>\n\n"
+                f"<b>ID:</b> <code>{uid}</code>\n"
+                f"<b>Name:</b> {u.get('first_name','N/A')}\n"
+                f"<b>Username:</b> @{u.get('username') or 'N/A'}\n"
+                f"<b>Status:</b> {ban_status}\n"
+                f"{get_line(12)}\n"
+                f"<b>{ce('money')} Balance:</b> ₹{u.get('balance',0)/100:.2f}\n"
+                f"<b>{ce('stats')} Spent:</b> ₹{u.get('total_spent',0)/100:.2f}\n"
+                f"<b>{ce('key')} Keys:</b> {keys_count}\n"
+                f"<b>{ce('gift')} Referrals:</b> {u.get('total_referrals',0)}\n"
+                f"<b>{ce('time')} Joined:</b> {str(u.get('joined_date',''))[:10]}\n"
+            )
+            ban_btn = InlineKeyboardButton(f"{ce_button('success')} Unban", callback_data=f"adm_quickunban_{uid}") if u.get('is_banned') else InlineKeyboardButton(f"{ce_button('fail')} Ban", callback_data=f"adm_quickban_{uid}")
+            buttons = [
+                [ban_btn, InlineKeyboardButton(f"{ce_button('money')} Add Balance", callback_data=f"adm_quickbal_{uid}")],
+                [InlineKeyboardButton(f"{ce_button('back')} Back to Users", callback_data="adm_browse_users_0")]
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("adm_quickban_"):
+            uid = int(data.split("_")[2])
+            db.ban_user(uid, 1)
+            db.log_admin_action(user_id, "Banned User", f"UID: {uid}")
+            await query.answer(f"User {uid} BANNED!", show_alert=True)
+            u = db.get_user(uid)
+            keys_count = db.get_user_keys_count(uid)
+            text = (
+                f"<blockquote><b>{ce('user')} USER DETAILS</b></blockquote>\n\n"
+                f"<b>ID:</b> <code>{uid}</code>\n"
+                f"<b>Name:</b> {u.get('first_name','N/A')}\n"
+                f"<b>Status:</b> {ce('fail')} BANNED\n"
+                f"<b>{ce('money')} Balance:</b> ₹{u.get('balance',0)/100:.2f}\n"
+                f"<b>{ce('key')} Keys:</b> {keys_count}"
+            )
+            buttons = [
+                [InlineKeyboardButton(f"{ce_button('success')} Unban", callback_data=f"adm_quickunban_{uid}"),
+                 InlineKeyboardButton(f"{ce_button('money')} Add Balance", callback_data=f"adm_quickbal_{uid}")],
+                [InlineKeyboardButton(f"{ce_button('back')} Back to Users", callback_data="adm_browse_users_0")]
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("adm_quickunban_"):
+            uid = int(data.split("_")[2])
+            db.ban_user(uid, 0)
+            db.log_admin_action(user_id, "Unbanned User", f"UID: {uid}")
+            await query.answer(f"User {uid} UNBANNED!", show_alert=True)
+            u = db.get_user(uid)
+            keys_count = db.get_user_keys_count(uid)
+            text = (
+                f"<blockquote><b>{ce('user')} USER DETAILS</b></blockquote>\n\n"
+                f"<b>ID:</b> <code>{uid}</code>\n"
+                f"<b>Name:</b> {u.get('first_name','N/A')}\n"
+                f"<b>Status:</b> {ce('success')} ACTIVE\n"
+                f"<b>{ce('money')} Balance:</b> ₹{u.get('balance',0)/100:.2f}\n"
+                f"<b>{ce('key')} Keys:</b> {keys_count}"
+            )
+            buttons = [
+                [InlineKeyboardButton(f"{ce_button('fail')} Ban", callback_data=f"adm_quickban_{uid}"),
+                 InlineKeyboardButton(f"{ce_button('money')} Add Balance", callback_data=f"adm_quickbal_{uid}")],
+                [InlineKeyboardButton(f"{ce_button('back')} Back to Users", callback_data="adm_browse_users_0")]
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("adm_quickbal_"):
+            await query.answer()
+            uid = int(data.split("_")[2])
+            context.user_data['quickbal_uid'] = uid
+            u = db.get_user(uid)
+            await safe_edit_text(
+                update, context,
+                f"<blockquote><b>{ce('money')} ADD BALANCE</b></blockquote>\n\n"
+                f"User: <b>{u.get('first_name','?')}</b> (<code>{uid}</code>)\n"
+                f"Current Balance: ₹{u.get('balance',0)/100:.2f}\n\n"
+                f"<i>Type the amount in INR to add:</i>",
+                cancel_kb()
+            )
+            context.user_data['quickbal_active'] = True
 
         # --- Settings Management ---
         elif data == "admin_settings":
@@ -2226,23 +2544,44 @@ async def receive_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Invalid ID.", reply_markup=admin_menu_kb())
     return ConversationHandler.END
 
-# ----------------- DYNAMIC CATCH-ALL (Fund Approvals) -----------------
+# ----------------- DYNAMIC CATCH-ALL (Fund Approvals & Quick Balance) -----------------
 async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('fund_req_id'):
         try:
             amt_inr = float(update.message.text)
             amt_paise = int(amt_inr * 100)
             req_id = context.user_data.pop('fund_req_id')
+            context.user_data.pop('fund_preloaded_amt', None)
             req = db.get_fund_request(req_id)
             db.update_fund_request(req_id, 'APPROVED', amt_paise)
             db.update_balance(req.get('user_id'), amt_paise)
-            db.log_admin_action(update.effective_user.id, "Approved UTR", f"ReqID: {req_id}, Amt: {amt_inr}")
+            db.log_admin_action(update.effective_user.id, "Approved Payment", f"ReqID: {req_id}, Amt: {amt_inr}")
             await update.message.reply_text(f"<blockquote>{ce('success')} <b>Approved and added ₹{amt_inr:.2f} to user.</b></blockquote>", reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML)
-            try: await context.bot.send_message(req.get('user_id'), f"<blockquote>{ce('success')} <b>FUND REQUEST APPROVED!</b></blockquote>\n\n₹{amt_inr:.2f} added to your wallet.", parse_mode=ParseMode.HTML)
+            try: await context.bot.send_message(req.get('user_id'), f"<blockquote>{ce('success')} <b>PAYMENT APPROVED!</b></blockquote>\n\n₹{amt_inr:.2f} added to your wallet. {ce('money')}", parse_mode=ParseMode.HTML)
             except: pass
         except Exception as e:
             logger.error(f"Global text handler error: {traceback.format_exc()}")
             await update.message.reply_text("Invalid amount. Request aborted.", reply_markup=admin_menu_kb())
+    elif context.user_data.get('quickbal_active'):
+        try:
+            amt_inr = float(update.message.text)
+            amt_paise = int(amt_inr * 100)
+            uid = context.user_data.pop('quickbal_uid')
+            context.user_data.pop('quickbal_active', None)
+            db.update_balance(uid, amt_paise)
+            db.log_admin_action(update.effective_user.id, "Quick Balance Add", f"UID: {uid}, Amt: {amt_inr}")
+            u = db.get_user(uid)
+            await update.message.reply_text(
+                f"<blockquote>{ce('success')} <b>Added ₹{amt_inr:.2f} to user <code>{uid}</code>.</b></blockquote>\n"
+                f"New balance: ₹{u.get('balance',0)/100:.2f}",
+                reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML
+            )
+            try: await context.bot.send_message(uid, f"<blockquote>{ce('success')} <b>BALANCE ADDED!</b></blockquote>\n\n₹{amt_inr:.2f} has been added to your wallet by Admin. {ce('money')}", parse_mode=ParseMode.HTML)
+            except: pass
+        except Exception as e:
+            logger.error(f"Quick balance handler error: {e}")
+            context.user_data.pop('quickbal_active', None)
+            await update.message.reply_text("Invalid amount.", reply_markup=admin_menu_kb())
 
 
 # ==============================================================================
