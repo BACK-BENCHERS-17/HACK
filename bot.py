@@ -32,6 +32,7 @@ import os
 import traceback
 import re
 from urllib.parse import quote
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Union
 
@@ -171,8 +172,9 @@ def get_line(n=12):
     WAIT_FOR_SETTING_SUP, WAIT_FOR_BAN_USER, WAIT_FOR_UNBAN_USER, WAIT_FOR_SETTING_MSG, 
     WAIT_FOR_MANUAL_BAL_USER, WAIT_FOR_MANUAL_BAL_AMT, WAIT_FOR_PROMO_CODE, WAIT_FOR_PROMO_REWARD,
     WAIT_FOR_PROMO_USES, WAIT_FOR_USER_PROMO, WAIT_FOR_FAQ, WAIT_FOR_TOS, WAIT_FOR_EDIT_PROD_DESC,
-    WAIT_FOR_PROD_LINK, WAIT_FOR_HOW_TO_TEXT, WAIT_FOR_HOW_TO_VIDEO
-) = range(28)
+    WAIT_FOR_PROD_LINK, WAIT_FOR_HOW_TO_TEXT, WAIT_FOR_HOW_TO_VIDEO,
+    WAIT_FOR_SCREENSHOT, WAIT_FOR_QR_79, WAIT_FOR_QR_189, WAIT_FOR_QR_349
+) = range(32)
 
 # ==============================================================================
 # 2. DATABASE MANAGER
@@ -243,8 +245,14 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, plan_id INTEGER, key_id INTEGER, amount INTEGER, purchase_date TEXT
             )""")
             c.execute("""CREATE TABLE IF NOT EXISTS fund_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount_requested INTEGER DEFAULT 0, utr TEXT UNIQUE, status TEXT DEFAULT 'PENDING', request_date TEXT, resolved_date TEXT, FOREIGN KEY(user_id) REFERENCES users(user_id)
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount_requested INTEGER DEFAULT 0, utr TEXT UNIQUE, status TEXT DEFAULT 'PENDING', request_date TEXT, resolved_date TEXT, photo_file_id TEXT, amount_selected INTEGER DEFAULT 0, FOREIGN KEY(user_id) REFERENCES users(user_id)
             )""")
+            c.execute("PRAGMA table_info(fund_requests)")
+            fr_cols = [col[1] for col in c.fetchall()]
+            if 'photo_file_id' not in fr_cols:
+                c.execute("ALTER TABLE fund_requests ADD COLUMN photo_file_id TEXT")
+            if 'amount_selected' not in fr_cols:
+                c.execute("ALTER TABLE fund_requests ADD COLUMN amount_selected INTEGER DEFAULT 0")
             c.execute("""CREATE TABLE IF NOT EXISTS tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, message TEXT, reply TEXT, status TEXT DEFAULT 'OPEN', created_at TEXT, resolved_at TEXT
             )""")
@@ -270,6 +278,9 @@ class DatabaseManager:
             c = conn.cursor()
             defaults = {
                 'qr_image': None,
+                'qr_79': None,
+                'qr_189': None,
+                'qr_349': None,
                 'upi_id': 'admin@upi',
                 'support_user': '@VIPxMODRETOX',
                 'unauth_msg': f"<blockquote><b>{ce('angry')} Aukaat mein reh! {ce('fail')}</b></blockquote>\n\n<i>Jhaat bhar ka aadmi, ye command use karne ki koshish kaise kar raha hai?</i>\n\n<b>Chup chap normal menu use kar, tera baap baithe hain yaha control karne!</b> {ce('admin')}",
@@ -587,16 +598,17 @@ class DatabaseManager:
         return count
 
     # Funds & Tickets
-    def create_fund_request(self, user_id: int, utr: str) -> bool:
+    def create_fund_request(self, user_id: int, photo_file_id: str, amount_selected: int) -> int:
         with self.lock:
             conn = self.get_connection()
-            if conn.execute("SELECT id FROM fund_requests WHERE utr=?", (utr,)).fetchone():
-                conn.close()
-                return False
-            conn.execute("INSERT INTO fund_requests (user_id, utr, request_date) VALUES (?, ?, ?)", (user_id, utr, datetime.now().isoformat()))
+            c = conn.cursor()
+            unique_key = f"{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+            c.execute("INSERT INTO fund_requests (user_id, utr, photo_file_id, amount_selected, request_date) VALUES (?, ?, ?, ?, ?)", 
+                      (user_id, unique_key, photo_file_id, amount_selected, datetime.now().isoformat()))
+            last_id = c.lastrowid
             conn.commit()
             conn.close()
-            return True
+            return last_id
 
     def get_pending_fund_requests(self):
         conn = self.get_connection()
@@ -1111,21 +1123,50 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "user_add_fund":
             await query.answer()
-            qr_file_id = db.get_setting("qr_image")
             upi_id = db.get_setting("upi_id")
             text = (
                 f"<blockquote><b>{ce('money')} ADD FUNDS TO WALLET {ce('card')}</b></blockquote>\n\n"
-                f"<b>{ce('1')} UPI ID:</b> <code>{upi_id}</code>\n"
-                f"<b>{ce('2')} Pay the amount in INR.</b>\n"
-                f"<b>{ce('3')} Copy 12-digit UTR/Ref No.</b>\n"
-                f"<b>{ce('4')} Click SUBMIT UTR below.</b>\n"
+                f"<b>{ce('1')} Select the amount you want to pay.</b>\n"
+                f"<b>{ce('2')} Scan the QR Code & pay via UPI.</b>\n"
+                f"<b>{ce('3')} Send the payment screenshot.</b>\n"
+                f"<b>{ce('4')} Admin will verify & credit your wallet.</b>\n"
                 f"{get_line(12)}\n"
-                f"<i>Funds will be credited upon verification.</i>\n\n"
+                f"<b>{ce('card')} UPI ID:</b> <code>{upi_id}</code>\n"
+                f"{get_line(12)}\n"
+                f"{ce('down')} <b>Select your payment amount:</b>"
             )
-            buttons = [[InlineKeyboardButton(f"{ce_button('success')} SUBMIT UTR", callback_data="submit_utr")],[InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="user_main")]
+            buttons = [
+                [InlineKeyboardButton(f"{ce_button('money')} ₹79 — Basic Plan", callback_data="pay_79"),
+                 InlineKeyboardButton(f"{ce_button('star')} ₹189 — Pro Plan", callback_data="pay_189")],
+                [InlineKeyboardButton(f"{ce_button('fire')} ₹349 — Premium Plan", callback_data="pay_349")],
+                [InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="user_main")]
             ]
-            if qr_file_id and qr_file_id != "None":
-                await query.message.delete()
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data in ("pay_79", "pay_189", "pay_349"):
+            await query.answer()
+            amount_map = {"pay_79": (79, "qr_79"), "pay_189": (189, "qr_189"), "pay_349": (349, "qr_349")}
+            amount_inr, qr_key = amount_map[data]
+            qr_file_id = db.get_setting(qr_key)
+            upi_id = db.get_setting("upi_id")
+            context.user_data['pay_amount'] = amount_inr
+            text = (
+                f"<blockquote><b>{ce('card')} PAY ₹{amount_inr} — SCAN QR {ce('money')}</b></blockquote>\n\n"
+                f"<b>{ce('1')} Scan the QR Code below.</b>\n"
+                f"<b>{ce('2')} Pay exactly <b>₹{amount_inr}</b> via UPI.</b>\n"
+                f"<b>{ce('3')} UPI ID:</b> <code>{upi_id}</code>\n"
+                f"<b>{ce('4')} After paying, click <b>SEND SCREENSHOT</b> below.</b>\n"
+                f"{get_line(12)}\n"
+                f"<i>{ce('warning')} Do not close this chat after payment!</i>"
+            )
+            buttons = [
+                [InlineKeyboardButton(f"{ce_button('success')} ✅ SEND PAYMENT SCREENSHOT", callback_data=f"submit_screenshot_{amount_inr}")],
+                [InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="user_add_fund")]
+            ]
+            if qr_file_id and qr_file_id not in (None, "None", ""):
+                try:
+                    await query.message.delete()
+                except: pass
                 await context.bot.send_photo(
                     chat_id=query.message.chat_id,
                     photo=qr_file_id,
@@ -1264,18 +1305,29 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "user_stock":
             await query.answer()
-            summary = db.get_stock_summary()
-            if not summary:
+            products = db.get_active_products()
+            if not products:
                 await safe_edit_text(update, context, f"<blockquote>{ce('warning')} No stock available right now.</blockquote>", back_kb("user_main"))
                 return
 
-            text = f"<blockquote><b>{ce('search')} CURRENT STOCK STATUS {ce('stock')}</b></blockquote>\n\n"
-            for prod_name, plans in summary.items():
-                text += f"<b>{ce('game')} {prod_name}</b>\n"
-                for pl in plans: text += f"  ├ <b>{pl['duration']}: {pl['count']} keys</b>\n"
-                text += "\n"
-            
-            await safe_edit_text(update, context, text, back_kb("user_main"))
+            text = f"<blockquote><b>{ce('search')} CURRENT STOCK STATUS {ce('stock')}</b></blockquote>\n\n<i>Click a plan to buy instantly!</i>\n{get_line(12)}\n"
+            buttons = []
+            for prod in products:
+                plans = db.get_plans(prod['id'])
+                for pl in plans:
+                    conn = db.get_connection()
+                    count = conn.execute("SELECT COUNT(*) FROM keys WHERE plan_id=? AND is_sold=0", (pl['id'],)).fetchone()[0]
+                    conn.close()
+                    stock_icon = ce_button('success') if count > 0 else ce_button('fail')
+                    stock_label = f"{count} in stock" if count > 0 else "OUT OF STOCK"
+                    text += f"{ce('game')} <b>{prod['name']}</b> — {pl['duration']} — ₹{pl['price']/100:.0f} [{stock_label}]\n"
+                    if count > 0:
+                        buttons.append([InlineKeyboardButton(
+                            f"{stock_icon} {prod['name']} | {pl['duration']} | ₹{pl['price']/100:.0f}",
+                            callback_data=f"buy_plan_{pl['id']}"
+                        )])
+            buttons.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="user_main")])
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data == "user_contact":
             await query.answer()
@@ -1485,17 +1537,30 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 insult_clean = re.sub(r'<[^>]+>', '', insult_raw)
                 insult_preview = insult_clean[:40] + "..." if len(insult_clean) > 40 else insult_clean
                 
+                qr79_status = "Set ✅" if db.get_setting("qr_79") not in (None, "None", "") else "Not Set ❌"
+                qr189_status = "Set ✅" if db.get_setting("qr_189") not in (None, "None", "") else "Not Set ❌"
+                qr349_status = "Set ✅" if db.get_setting("qr_349") not in (None, "None", "") else "Not Set ❌"
                 text = (
                     f"<blockquote><b>{ce('settings')} STORE SETTINGS</b></blockquote>\n\n"
                     f"<code>UPI ID       : {upi}\n"
                     f"Support User : {support}\n"
-                    f"QR Code      : {qr_status}\n"
+                    f"QR ₹79       : {qr79_status}\n"
+                    f"QR ₹189      : {qr189_status}\n"
+                    f"QR ₹349      : {qr349_status}\n"
                     f"Download Link: {dl_link}</code>\n\n"
                     f"<b>Insult Msg:</b>\n<i>{insult_preview}</i>\n"
                     f"{get_line(12)}\n"
                     f"<i>Choose a setting to modify below:</i>"
                 )
-                buttons =[[InlineKeyboardButton(f"{ce_button('pencil')} Edit UPI ID", callback_data="adm_set_upi"), InlineKeyboardButton(f"{ce_button('pencil')} Edit Support User", callback_data="adm_set_sup")],[InlineKeyboardButton(f"{ce_button('pencil')} Edit QR Image", callback_data="adm_set_qr"), InlineKeyboardButton(f"{ce_button('pencil')} Edit Insult Msg", callback_data="adm_set_msg")],[InlineKeyboardButton(f"{ce_button('link')} Edit Download Channel", callback_data="adm_set_dl_link")],[InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_main")]
+                buttons = [
+                    [InlineKeyboardButton(f"{ce_button('pencil')} Edit UPI ID", callback_data="adm_set_upi"),
+                     InlineKeyboardButton(f"{ce_button('pencil')} Edit Support User", callback_data="adm_set_sup")],
+                    [InlineKeyboardButton(f"{ce_button('pencil')} QR ₹79", callback_data="adm_set_qr79"),
+                     InlineKeyboardButton(f"{ce_button('pencil')} QR ₹189", callback_data="adm_set_qr189"),
+                     InlineKeyboardButton(f"{ce_button('pencil')} QR ₹349", callback_data="adm_set_qr349")],
+                    [InlineKeyboardButton(f"{ce_button('pencil')} Edit Insult Msg", callback_data="adm_set_msg")],
+                    [InlineKeyboardButton(f"{ce_button('link')} Edit Download Channel", callback_data="adm_set_dl_link")],
+                    [InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_main")]
                 ]
                 await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
             except Exception as e:
@@ -1521,25 +1586,50 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 return
             
             r = reqs[0]
+            amt_sel = r.get('amount_selected', 0)
+            amt_text = f"₹{amt_sel}" if amt_sel else "Unknown"
             text = (
-                f"<blockquote><b>{ce('card')} FUND REQUEST PENDING</b></blockquote>\n\n"
-                f"<code>Req ID : {r['id']}\n"
-                f"User   : @{r.get('username')} ({r['user_id']})\n"
-                f"Name   : {r.get('first_name')}\n"
-                f"UTR    : {r['utr']}\n"
-                f"Date   : {r['request_date'][:19]}</code>\n"
+                f"<blockquote><b>{ce('card')} PAYMENT SCREENSHOT REQUEST</b></blockquote>\n\n"
+                f"<code>Req ID  : {r['id']}\n"
+                f"User    : @{r.get('username')} ({r['user_id']})\n"
+                f"Name    : {r.get('first_name')}\n"
+                f"Amount  : {amt_text}\n"
+                f"Date    : {r['request_date'][:19]}</code>\n"
                 f"{get_line(12)}\n"
-                f"<i>Action: Approve or Reject?</i>"
+                f"<i>{ce('warning')} Check the screenshot above. Approve or Reject?</i>"
             )
-            buttons = [[InlineKeyboardButton(f"{ce_button('success')} Approve", callback_data=f"adm_appr_{r['id']}"), InlineKeyboardButton(f"{ce_button('fail')} Reject", callback_data=f"adm_rej_{r['id']}")],[InlineKeyboardButton(f"{ce_button('right')} Skip for now", callback_data="admin_main")]
+            buttons = [
+                [InlineKeyboardButton(f"{ce_button('success')} ✅ Approve ₹{amt_sel}", callback_data=f"adm_appr_{r['id']}"),
+                 InlineKeyboardButton(f"{ce_button('fail')} ❌ Reject", callback_data=f"adm_rej_{r['id']}")],
+                [InlineKeyboardButton(f"{ce_button('right')} Skip for now", callback_data="admin_main")]
             ]
-            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+            photo_id = r.get('photo_file_id')
+            if photo_id:
+                try:
+                    await query.message.delete()
+                except: pass
+                await context.bot.send_photo(
+                    chat_id=query.message.chat_id,
+                    photo=photo_id,
+                    caption=text,
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data.startswith("adm_appr_"):
             await query.answer()
             req_id = int(data.split("_")[2])
+            req = db.get_fund_request(req_id)
+            amt_sel = req.get('amount_selected', 0)
             context.user_data['fund_req_id'] = req_id
-            await safe_edit_text(update, context, f"<blockquote>{ce('money')} How much amount (in INR) to credit for this UTR? Send number in chat.</blockquote>", cancel_kb())
+            context.user_data['fund_preloaded_amt'] = amt_sel
+            if amt_sel:
+                hint = f"<blockquote>{ce('money')} User selected ₹{amt_sel}. Send amount in INR to credit (or just type <b>{amt_sel}</b> to confirm):</blockquote>"
+            else:
+                hint = f"<blockquote>{ce('money')} How much amount (in INR) to credit? Send number in chat.</blockquote>"
+            await safe_edit_text(update, context, hint, cancel_kb())
 
         elif data.startswith("adm_rej_"):
             await query.answer()
@@ -1603,14 +1693,80 @@ async def receive_utr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(utr) < 8:
         await update.message.reply_text(f"<blockquote>{ce('fail')} Invalid UTR. Please try again or cancel.</blockquote>", reply_markup=cancel_kb(), parse_mode=ParseMode.HTML)
         return WAIT_FOR_UTR
+    amt = context.user_data.get('pay_amount', 0)
+    req_id = db.create_fund_request(user_id, f"utr_{utr}", int(amt))
+    await update.message.reply_text(f"<blockquote>{ce('success')} <b>Submitted Successfully!</b></blockquote>", reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
+    for admin in ADMIN_IDS:
+        try: await context.bot.send_message(admin, f"<blockquote><b>{ce('bell')} NEW FUND REQUEST</b></blockquote>\nUser: {update.effective_user.username} (<code>{user_id}</code>)\nUTR: <code>{utr}</code>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{ce_button('success')} Review Now", callback_data="admin_approvals")]]))
+        except: pass
+    return ConversationHandler.END
 
-    if db.create_fund_request(user_id, utr):
-        await update.message.reply_text(f"<blockquote>{ce('success')} <b>UTR Submitted Successfully!</b></blockquote>", reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
-        for admin in ADMIN_IDS:
-            try: await context.bot.send_message(admin, f"<blockquote><b>{ce('bell')} NEW FUND REQUEST</b></blockquote>\nUser: {update.effective_user.username} (<code>{user_id}</code>)\nUTR: <code>{utr}</code>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{ce_button('success')} Review Now", callback_data="admin_approvals")]]))
-            except: pass
-    else:
-        await update.message.reply_text(f"<blockquote>{ce('fail')} <b>UTR Already Exists!</b></blockquote>", reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
+@verification_required
+async def prompt_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    data = update.callback_query.data
+    try:
+        amount_inr = int(data.split("_")[2])
+    except:
+        amount_inr = 0
+    context.user_data['pay_amount'] = amount_inr
+    await safe_edit_text(
+        update, context,
+        f"<blockquote><b>{ce('outbox')} SEND PAYMENT SCREENSHOT</b></blockquote>\n\n"
+        f"<i>Please send your payment screenshot as a photo now.</i>\n"
+        f"<b>Amount: ₹{amount_inr}</b>\n\n"
+        f"<i>{ce('warning')} Admin will review and credit your wallet manually.</i>",
+        cancel_kb()
+    )
+    return WAIT_FOR_SCREENSHOT
+
+async def receive_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not update.message.photo:
+        await update.message.reply_text(
+            f"<blockquote>{ce('fail')} Please send a <b>PHOTO</b> (screenshot), not a document or text.</blockquote>",
+            reply_markup=cancel_kb(), parse_mode=ParseMode.HTML
+        )
+        return WAIT_FOR_SCREENSHOT
+    
+    photo_file_id = update.message.photo[-1].file_id
+    amount_inr = context.user_data.get('pay_amount', 0)
+    amount_paise = int(amount_inr)
+    
+    req_id = db.create_fund_request(user_id, photo_file_id, amount_paise)
+    
+    await update.message.reply_text(
+        f"<blockquote>{ce('success')} <b>SCREENSHOT SUBMITTED!</b></blockquote>\n\n"
+        f"<i>Your payment of ₹{amount_inr} is under review.\n"
+        f"Admin will verify and credit your wallet shortly!</i>",
+        reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML
+    )
+    
+    username = update.effective_user.username
+    first_name = update.effective_user.first_name
+    admin_caption = (
+        f"<blockquote><b>{ce('bell')} NEW PAYMENT SCREENSHOT</b></blockquote>\n\n"
+        f"<code>Req ID  : {req_id}\n"
+        f"User    : @{username} ({user_id})\n"
+        f"Name    : {first_name}\n"
+        f"Amount  : ₹{amount_inr}</code>\n"
+        f"{get_line(12)}\n"
+        f"<i>Review screenshot above and approve or reject.</i>"
+    )
+    review_kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"{ce_button('success')} Review Now", callback_data="admin_approvals")]])
+    for admin in ADMIN_IDS:
+        try:
+            await context.bot.send_photo(
+                chat_id=admin,
+                photo=photo_file_id,
+                caption=admin_caption,
+                reply_markup=review_kb,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"Error forwarding screenshot to admin {admin}: {e}")
+    
+    context.user_data.clear()
     return ConversationHandler.END
 
 @verification_required
@@ -1943,6 +2099,45 @@ async def receive_set_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 @verification_required
+async def prompt_set_qr79(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await safe_edit_text(update, context, f"<blockquote><b>{ce('card')} Send the QR Code image for <b>₹79</b> as a PHOTO:</b></blockquote>", cancel_kb())
+    return WAIT_FOR_QR_79
+
+async def receive_set_qr79(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
+    db.set_setting('qr_79', photo.file_id)
+    db.log_admin_action(update.effective_user.id, "Changed QR ₹79", "Setting Updated")
+    await update.message.reply_text(f"<blockquote>{ce('success')} <b>QR Code for ₹79 Updated!</b></blockquote>", reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+@verification_required
+async def prompt_set_qr189(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await safe_edit_text(update, context, f"<blockquote><b>{ce('card')} Send the QR Code image for <b>₹189</b> as a PHOTO:</b></blockquote>", cancel_kb())
+    return WAIT_FOR_QR_189
+
+async def receive_set_qr189(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
+    db.set_setting('qr_189', photo.file_id)
+    db.log_admin_action(update.effective_user.id, "Changed QR ₹189", "Setting Updated")
+    await update.message.reply_text(f"<blockquote>{ce('success')} <b>QR Code for ₹189 Updated!</b></blockquote>", reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+@verification_required
+async def prompt_set_qr349(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await safe_edit_text(update, context, f"<blockquote><b>{ce('card')} Send the QR Code image for <b>₹349</b> as a PHOTO:</b></blockquote>", cancel_kb())
+    return WAIT_FOR_QR_349
+
+async def receive_set_qr349(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
+    db.set_setting('qr_349', photo.file_id)
+    db.log_admin_action(update.effective_user.id, "Changed QR ₹349", "Setting Updated")
+    await update.message.reply_text(f"<blockquote>{ce('success')} <b>QR Code for ₹349 Updated!</b></blockquote>", reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+@verification_required
 async def prompt_set_sup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(update, context, "<blockquote><b>Send the new Support Username (e.g. @YourAdmin):</b></blockquote>", cancel_kb())
@@ -2067,6 +2262,9 @@ def main():
             CallbackQueryHandler(prompt_broadcast, pattern="^admin_broadcast$"),
             CallbackQueryHandler(prompt_set_upi, pattern="^adm_set_upi$"),
             CallbackQueryHandler(prompt_set_qr, pattern="^adm_set_qr$"),
+            CallbackQueryHandler(prompt_set_qr79, pattern="^adm_set_qr79$"),
+            CallbackQueryHandler(prompt_set_qr189, pattern="^adm_set_qr189$"),
+            CallbackQueryHandler(prompt_set_qr349, pattern="^adm_set_qr349$"),
             CallbackQueryHandler(prompt_set_sup, pattern="^adm_set_sup$"),
             CallbackQueryHandler(prompt_set_msg, pattern="^adm_set_msg$"),
             CallbackQueryHandler(prompt_ban, pattern="^adm_ban_usr$"),
@@ -2088,6 +2286,9 @@ def main():
             WAIT_FOR_BROADCAST:[MessageHandler(filters.TEXT & ~filters.COMMAND, receive_broadcast)],
             WAIT_FOR_SETTING_UPI:[MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_upi)],
             WAIT_FOR_SETTING_QR:[MessageHandler(filters.PHOTO, receive_set_qr)],
+            WAIT_FOR_QR_79:[MessageHandler(filters.PHOTO, receive_set_qr79)],
+            WAIT_FOR_QR_189:[MessageHandler(filters.PHOTO, receive_set_qr189)],
+            WAIT_FOR_QR_349:[MessageHandler(filters.PHOTO, receive_set_qr349)],
             WAIT_FOR_SETTING_SUP:[MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_sup)],
             WAIT_FOR_SETTING_MSG:[MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_msg)],
             WAIT_FOR_BAN_USER:[MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ban)],
@@ -2124,11 +2325,16 @@ def main():
     user_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(prompt_utr, pattern="^submit_utr$"),
+            CallbackQueryHandler(prompt_screenshot, pattern="^submit_screenshot_"),
             CallbackQueryHandler(prompt_ticket, pattern="^user_ticket$"),
             CallbackQueryHandler(prompt_user_promo, pattern="^user_promo$"),
         ],
         states={
             WAIT_FOR_UTR:[MessageHandler(filters.TEXT & ~filters.COMMAND, receive_utr)],
+            WAIT_FOR_SCREENSHOT:[
+                MessageHandler(filters.PHOTO, receive_screenshot),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_screenshot),
+            ],
             WAIT_FOR_TICKET:[MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ticket)],
             WAIT_FOR_USER_PROMO:[MessageHandler(filters.TEXT & ~filters.COMMAND, receive_user_promo)],
         },
@@ -2139,10 +2345,29 @@ def main():
     app.add_handler(user_conv)
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
-    app.add_handler(CallbackQueryHandler(handle_user_callbacks, pattern="^user_|^buy_|^confirm_buy_|^submit_utr$"))
+    app.add_handler(CallbackQueryHandler(handle_user_callbacks, pattern="^user_|^buy_|^confirm_buy_|^submit_utr$|^pay_|^submit_screenshot_"))
     app.add_handler(CallbackQueryHandler(handle_admin_callbacks, pattern="^admin_|^adm_"))
 
     print("🔥 Bot is successfully starting... (Mega Enterprise Edition V11) 🔥")
+
+    port = int(os.environ.get("PORT", 8080))
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is alive!")
+        def log_message(self, format, *args):
+            pass
+
+    def run_health_server():
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        logger.info(f"Keep-alive server started on port {port}")
+        server.serve_forever()
+
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+
     app.run_polling()
 
 if __name__ == "__main__":
