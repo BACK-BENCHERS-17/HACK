@@ -268,8 +268,23 @@ CREDIT_KEYWORDS = (
     "has credited",
 )
 
-UTR_RE = re.compile(r"\b(?:UTR|RRN|Txn(?:\s*Id)?|Reference(?:\s*No)?|Ref\s*No)[:\s\-]+([A-Za-z0-9]{8,})", re.I)
+UTR_RE = re.compile(r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?)[:\s\-/]+([A-Za-z0-9]{8,})", re.I)
+TXN_RE = re.compile(r"\b(?:Txn(?:\s*Id)?|Transaction(?:\s*Id)?|Reference(?:\s*No)?|Ref\s*No)[:\s\-]+([A-Za-z0-9]{8,})", re.I)
 AMOUNT_RE = re.compile(r"(?:Rs\.?|INR|₹)\s*([0-9]+(?:[,.][0-9]{1,2})?)", re.I)
+# Sender name patterns: "from Anuj Patel", "received from Anuj Patel", "From: Anuj Patel"
+# Stops at: punctuation, newline, emoji, common follow-up words, or end-of-input.
+SENDER_RE = re.compile(
+    r"(?:received\s+(?:money\s+)?from|^from|\bfrom)[:\s]+"
+    r"([A-Z][A-Za-z][A-Za-z .'\-]{1,60}?)"
+    r"(?:"
+    r"\s*(?:\bvia\b|\bon\b|\bby\b|\busing\b|\bfor\b|\bthrough\b|UPI|@)"
+    r"|\s*[•\-–|<\.,!₹]"
+    r"|\s*[^\x00-\x7F]"   # any non-ASCII (covers emojis & symbols)
+    r"|\s*\n"
+    r"|\s*$"
+    r")",
+    re.I | re.M,
+)
 
 
 def _decode_part(raw: bytes, charset: Optional[str]) -> str:
@@ -408,17 +423,24 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
             if not (order_match or amt_match):
                 continue
 
-            # Pull UTR / Txn Id
-            utr = ""
-            txn = ""
-            mu = UTR_RE.search(body) or UTR_RE.search(subject)
-            if mu:
-                utr = mu.group(1)
-                txn = mu.group(1)
+            # Pull UTR / Txn Id / Sender name from email content
+            scan = subject + "\n" + body
+            mu = UTR_RE.search(scan)
+            mt = TXN_RE.search(scan)
+            ms = SENDER_RE.search(scan)
+
+            utr = mu.group(1) if mu else ""
+            txn = mt.group(1) if mt else (utr or "")
+            sender_name = ""
+            if ms:
+                sender_name = ms.group(1).strip()
+                # Cleanup: strip "your" / "the" / quotes
+                sender_name = re.sub(r"^(your|the)\s+", "", sender_name, flags=re.I).strip(" .,'\"")
 
             return {
                 "utr": utr or "AUTO-VERIFIED",
                 "transaction_id": txn or msg.get("Message-Id", "").strip("<>") or "AUTO-VERIFIED",
+                "sender_name": sender_name or "Unknown",
                 "sender": sender,
                 "subject": subject,
             }
@@ -694,26 +716,32 @@ async def verify_payment(request: web.Request) -> web.Response:
 
     utr = match["utr"]
     txn = match["transaction_id"]
+    sender_name = match.get("sender_name", "Unknown")
     verified_at = _now_ist_str()
+    payment_time_ist = datetime.now(IST_TZ).strftime("%d-%m-%Y %H:%M:%S")
     orders_col.update_one(
         {"_id": order["_id"]},
         {"$set": {
             "status": "PAID",
             "utr": utr,
             "transaction_id": txn,
+            "sender_name": sender_name,
             "verified_at": time.time(),
             "verified_at_ist": verified_at,
+            "payment_time_ist": payment_time_ist,
             "matched_sender": match.get("sender", ""),
             "matched_subject": match.get("subject", ""),
         }},
     )
-    log.info("Verified order=%s utr=%s sender=%s",
-             order_id, utr, match.get("sender", ""))
+    log.info("Verified order=%s utr=%s from=%s sender_email=%s",
+             order_id, utr, sender_name, match.get("sender", ""))
     return _success({
         "utr": utr,
         "transaction_id": txn,
+        "sender_name": sender_name,
         "amount": float(order["amount"]),
         "verified_at_ist": verified_at,
+        "payment_time_ist": payment_time_ist,
     })
 
 
@@ -782,7 +810,9 @@ async def api_qr(request: web.Request) -> web.Response:
 
     order_id = (request.query.get("order_id") or "").strip()
     if not order_id:
-        order_id = "ORD" + secrets.token_hex(6).upper()
+        # FAMPAY-style: FAMPAY<YYYYMMDDHHMMSS><6-hex>
+        ts = datetime.now(IST_TZ).strftime("%Y%m%d%H%M%S")
+        order_id = "FAMPAY" + ts + secrets.token_hex(3).upper()
 
     upi_link = _build_upi_link(upi_id, payee_name, amount, order_id)
     png = _render_qr_png(upi_link)
@@ -825,22 +855,28 @@ async def api_qr(request: web.Request) -> web.Response:
             },
         )
 
-    expires_at_ist = datetime.fromtimestamp(expires_at, IST_TZ).strftime("%H:%M IST")
+    created_dt = datetime.fromtimestamp(time.time(), IST_TZ)
+    expires_dt = datetime.fromtimestamp(expires_at, IST_TZ)
     qr_url = f"{PUBLIC_BASE}/qr/{order_id}.png"
     log.info("API key=%s generated QR order=%s amount=%.2f upi=%s",
              api_key[:14] + "…", order_id, amount, upi_id)
-    return _success({
-        "order_id": order_id,
-        "upi": upi_id,
-        "payee_name": payee_name,
-        "amount": amount,
-        "upi_link": upi_link,
-        "qr_url": qr_url,
-        "qr_png_url": f"{PUBLIC_BASE}/qr.php?api_key={api_key}&upi={upi_id}"
-                      f"&amount={amount}&order_id={order_id}&format=png",
-        "qr_image_b64": base64.b64encode(png).decode("ascii"),
-        "expires_at_ist": expires_at_ist,
-        "expires_in_seconds": QR_TTL_SECONDS,
+    return web.json_response({
+        "status": "success",
+        "data": {
+            "order_id": order_id,
+            "qr_url": qr_url,
+            "qr_png_url": f"{PUBLIC_BASE}/qr.php?api_key={api_key}&upi={upi_id}"
+                          f"&amount={amount}&order_id={order_id}&format=png",
+            "qr_image_b64": base64.b64encode(png).decode("ascii"),
+            "upi_id": upi_id,
+            "upi_link": upi_link,
+            "amount": str(int(amount) if amount.is_integer() else amount),
+            "payee_name": payee_name,
+            "created_at_ist": created_dt.strftime("%d-%m-%Y %H:%M:%S"),
+            "expires_at_ist": expires_dt.strftime("%d-%m-%Y %H:%M:%S"),
+            "expires_in_seconds": QR_TTL_SECONDS,
+        },
+        "service": "hack-store-payment-svc",
     })
 
 
@@ -873,13 +909,19 @@ async def api_verify(request: web.Request) -> web.Response:
         return _err("This order does not belong to your api_key.", http_status=403)
 
     if order.get("status") == "PAID":
-        return _success({
-            "order_id": order_id,
-            "amount": float(order.get("amount", 0)),
-            "utr": order.get("utr", "N/A"),
-            "transaction_id": order.get("transaction_id", "N/A"),
-            "verified_at_ist": order.get("verified_at_ist", ""),
-            "cached": True,
+        return web.json_response({
+            "status": "success",
+            "data": {
+                "order_id": order_id,
+                "transaction_id": order.get("transaction_id", "N/A"),
+                "amount": float(order.get("amount", 0)),
+                "utr": order.get("utr", "N/A"),
+                "sender_name": order.get("sender_name", "Unknown"),
+                "payment_time_ist": order.get("payment_time_ist",
+                                              order.get("verified_at_ist", "")),
+                "cached": True,
+            },
+            "service": "hack-store-payment-svc",
         })
 
     # Find admin's Gmail session to scan inbox
@@ -912,34 +954,44 @@ async def api_verify(request: web.Request) -> web.Response:
 
     if not match:
         return web.json_response({
-            "status": "pending",
-            "message": "Payment not yet received.",
+            "status": "error",
+            "message": "Transaction failed - Payment not received",
             "order_id": order_id,
+            "service": "hack-store-payment-svc",
         })
 
     utr = match["utr"]
     txn = match["transaction_id"]
+    sender_name = match.get("sender_name", "Unknown")
     verified_at = _now_ist_str()
+    payment_time_ist = datetime.now(IST_TZ).strftime("%d-%m-%Y %H:%M:%S")
     orders_col.update_one(
         {"_id": order["_id"]},
         {"$set": {
             "status": "PAID",
             "utr": utr,
             "transaction_id": txn,
+            "sender_name": sender_name,
             "verified_at": time.time(),
             "verified_at_ist": verified_at,
+            "payment_time_ist": payment_time_ist,
             "matched_sender": match.get("sender", ""),
             "matched_subject": match.get("subject", ""),
         }},
     )
-    log.info("API verified order=%s utr=%s sender=%s",
-             order_id, utr, match.get("sender", ""))
-    return _success({
-        "order_id": order_id,
-        "amount": float(order["amount"]),
-        "utr": utr,
-        "transaction_id": txn,
-        "verified_at_ist": verified_at,
+    log.info("API verified order=%s utr=%s from=%s sender_email=%s",
+             order_id, utr, sender_name, match.get("sender", ""))
+    return web.json_response({
+        "status": "success",
+        "data": {
+            "order_id": order_id,
+            "transaction_id": txn,
+            "amount": float(order["amount"]),
+            "utr": utr,
+            "sender_name": sender_name,
+            "payment_time_ist": payment_time_ist,
+        },
+        "service": "hack-store-payment-svc",
     })
 
 
