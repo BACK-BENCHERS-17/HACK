@@ -3,5 +3,5 @@ pymongo==4.10.1
 dnspython==2.7.0
 python-dotenv==1.0.1
 aiohttp
-bson
-telegram
+cryptography
+qrcode[pil]

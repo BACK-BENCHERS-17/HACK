@@ -187,7 +187,7 @@ DEFAULT_SETTINGS = {
     ),
     "how_to_video": "https://t.me/YOUR_VIDEO_LINK_HERE",
     # NEW: Payment microservice settings
-    "payment_svc_url": "http://localhost:5000",
+    "payment_svc_url": "http://localhost:8000",
     "payment_svc_token": "",       # session token from /login
     "payment_svc_mobile": "",      # stored for re-login display
     "payment_svc_email": "",       # stored for re-login display
@@ -283,12 +283,19 @@ async def svc_login(svc_url: str, admin_id: int, mobile: str, email: str, otp: s
         return {"status": "error", "message": str(e)}
 
 
-async def svc_generate_qr(svc_url: str, token: str, admin_id: int, amount: float, order_id: str) -> dict:
+async def svc_generate_qr(svc_url: str, token: str, admin_id: int, amount: float,
+                          order_id: str, upi_id: str, payee_name: str = "Hack Store") -> dict:
     """Call POST /generate_qr on the payment microservice."""
     try:
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {token}"}
-            payload = {"admin_id": admin_id, "amount": amount, "order_id": order_id}
+            payload = {
+                "admin_id": admin_id,
+                "amount": amount,
+                "order_id": order_id,
+                "upi_id": upi_id,
+                "payee_name": payee_name,
+            }
             async with session.post(f"{svc_url}/generate_qr", json=payload, headers=headers,
                                     timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 return await resp.json()
@@ -673,8 +680,9 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             plan = db.get_plan(plan_id)
             price = plan['price'] / 100
 
-            svc_url   = db.get_setting("payment_svc_url", "http://localhost:5000")
+            svc_url   = db.get_setting("payment_svc_url", "http://localhost:8000")
             svc_token = db.get_setting("payment_svc_token", "")
+            admin_upi = db.get_setting("upi_id", "")
 
             if not svc_token:
                 await safe_edit_text(
@@ -685,13 +693,23 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 return
 
+            if not admin_upi or "@" not in admin_upi:
+                await safe_edit_text(
+                    update, context,
+                    f"<blockquote>{ce('fail')} <b>UPI ID is not configured.</b>\n"
+                    f"Admin must set a valid UPI ID in the Admin Panel first.</blockquote>",
+                    back_kb("user_buy_hack"),
+                )
+                return
+
             order_id = generate_order_id(plan_id, user_id)
             # Store fund_request in DB with PENDING status
             db.create_fund_request_with_order(user_id, order_id, plan_id, plan['price'])
 
             # Call microservice
             admin_id = ADMIN_IDS[0] if ADMIN_IDS else 0
-            result = await svc_generate_qr(svc_url, svc_token, admin_id, price, order_id)
+            payee = db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
+            result = await svc_generate_qr(svc_url, svc_token, admin_id, price, order_id, admin_upi, payee)
 
             if result.get("status") != "success":
                 err = result.get("message", "Unknown error")
@@ -737,7 +755,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         elif data.startswith("verify_pay_"):
             await query.answer("Verifying payment…", show_alert=False)
             order_id  = data[len("verify_pay_"):]
-            svc_url   = db.get_setting("payment_svc_url", "http://localhost:5000")
+            svc_url   = db.get_setting("payment_svc_url", "http://localhost:8000")
             svc_token = db.get_setting("payment_svc_token", "")
             admin_id  = ADMIN_IDS[0] if ADMIN_IDS else 0
 
@@ -1075,7 +1093,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         elif data == "admin_svc_session":
             await query.answer()
             token = db.get_setting("payment_svc_token", "")
-            svc_url = db.get_setting("payment_svc_url", "http://localhost:5000")
+            svc_url = db.get_setting("payment_svc_url", "http://localhost:8000")
             mobile  = db.get_setting("payment_svc_mobile", "Not set")
             email   = db.get_setting("payment_svc_email", "Not set")
             is_active = bool(token)
@@ -1149,7 +1167,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 )
                 return
 
-            svc_url  = db.get_setting("payment_svc_url", "http://localhost:5000")
+            svc_url  = db.get_setting("payment_svc_url", "http://localhost:8000")
             svc_token = db.get_setting("payment_svc_token", "")
             admin_id  = ADMIN_IDS[0] if ADMIN_IDS else 0
 
@@ -1512,8 +1530,8 @@ async def prompt_svc_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_edit_text(
         update, context,
         f"<blockquote><b>{ce('session')} STEP 1/3 — Mobile Number</b></blockquote>\n\n"
-        f"<i>Enter the mobile number registered with your payment service.</i>\n"
-        f"<b>Format:</b> <code>+919876543210</code>",
+        f"<i>Enter the mobile number registered with your UPI / FamPay account.</i>\n\n"
+        f"<b>Examples:</b> <code>9876543210</code> or <code>+919876543210</code>",
         cancel_kb(),
     )
     return WAIT_FOR_SVC_MOBILE
@@ -1523,22 +1541,25 @@ async def receive_svc_mobile(update: Update, context: ContextTypes.DEFAULT_TYPE)
     mobile = update.message.text.strip()
     if not re.match(r"^\+?\d{10,13}$", mobile):
         await update.message.reply_text(
-            f"<blockquote>{ce('fail')} Invalid mobile number. Please enter in format <code>+919876543210</code></blockquote>",
+            f"<blockquote>{ce('fail')} Invalid mobile number. "
+            f"Please enter a 10-digit number (e.g. <code>9876543210</code>).</blockquote>",
             reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
         )
         return WAIT_FOR_SVC_MOBILE
     context.user_data["svc_mobile"] = mobile
     await update.message.reply_text(
-        f"<blockquote><b>{ce('session')} STEP 2/3 — Email Address</b></blockquote>\n\n"
-        f"<i>Enter the Gmail linked to your payment service account.</i>",
+        f"<blockquote><b>{ce('session')} STEP 2/3 — Gmail Address</b></blockquote>\n\n"
+        f"<i>Enter the Gmail address that receives your UPI payment notifications.</i>\n\n"
+        f"<b>Example:</b> <code>yourname@gmail.com</code>\n"
+        f"<i>{ce('warning')} You'll need its <b>App Password</b> in the next step.</i>",
         reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
     )
     return WAIT_FOR_SVC_EMAIL
 
 
 async def receive_svc_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    email = update.message.text.strip()
-    if "@" not in email or "." not in email:
+    email = update.message.text.strip().lower()
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         await update.message.reply_text(
             f"<blockquote>{ce('fail')} Invalid email address. Please try again.</blockquote>",
             reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
@@ -1546,26 +1567,50 @@ async def receive_svc_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAIT_FOR_SVC_EMAIL
     context.user_data["svc_email"] = email
     await update.message.reply_text(
-        f"<blockquote><b>{ce('session')} STEP 3/3 — OTP / Verification Code</b></blockquote>\n\n"
-        f"<i>Check your email or phone for the OTP sent by the payment service, then enter it below.</i>",
+        f"<blockquote><b>{ce('session')} STEP 3/3 — Gmail App Password</b></blockquote>\n\n"
+        f"<i>Paste the <b>16-character Gmail App Password</b> for the email above.</i>\n\n"
+        f"<b>Format:</b> <code>xxxx xxxx xxxx xxxx</code> (spaces are ignored)\n\n"
+        f"<b>How to get one:</b>\n"
+        f"<b>1.</b> Enable 2-Step Verification on your Google account.\n"
+        f"<b>2.</b> Go to <i>Google Account → Security → App Passwords</i>.\n"
+        f"<b>3.</b> Create a new password named <code>Hack Store</code> and paste it here.\n\n"
+        f"<i>{ce('warning')} The password is stored encrypted and is used only to read "
+        f"UPI payment notifications from your inbox.</i>",
         reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
     )
     return WAIT_FOR_SVC_OTP
 
 
 async def receive_svc_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    otp = update.message.text.strip()
+    raw = update.message.text.strip()
+    app_password = re.sub(r"\s+", "", raw)
+    if len(app_password) != 16 or not re.match(r"^[A-Za-z0-9]+$", app_password):
+        await update.message.reply_text(
+            f"<blockquote>{ce('fail')} <b>Invalid App Password!</b>\n\n"
+            f"It must be exactly <b>16 characters</b> (letters/digits, spaces ignored).\n"
+            f"Generate one at <i>Google Account → Security → App Passwords</i> "
+            f"and paste it again.</blockquote>",
+            reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
+        )
+        return WAIT_FOR_SVC_OTP
+
     mobile = context.user_data.get("svc_mobile", "")
     email  = context.user_data.get("svc_email", "")
-    svc_url = db.get_setting("payment_svc_url", "http://localhost:5000")
+    svc_url = db.get_setting("payment_svc_url", "http://localhost:8000")
     admin_id = update.effective_user.id
 
     await update.message.reply_text(
-        f"<blockquote>{ce('refresh')} Logging in to payment service…</blockquote>",
+        f"<blockquote>{ce('refresh')} Logging in to Gmail / payment service…</blockquote>",
         parse_mode=ParseMode.HTML,
     )
 
-    result = await svc_login(svc_url, admin_id, mobile, email, otp)
+    # Try to delete the message containing the app password for safety
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    result = await svc_login(svc_url, admin_id, mobile, email, app_password)
 
     if result.get("status") == "ok":
         token = result.get("session_token", "")
@@ -1597,7 +1642,7 @@ async def prompt_set_svc_url(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await safe_edit_text(
         update, context,
         f"<blockquote><b>{ce('link')} Send the Microservice Base URL:</b></blockquote>\n\n"
-        f"<i>Example: <code>http://localhost:5000</code> or <code>https://your-server.com</code></i>",
+        f"<i>Example: <code>http://localhost:8000</code> or <code>https://your-server.com</code></i>",
         cancel_kb(),
     )
     return WAIT_FOR_SVC_URL
