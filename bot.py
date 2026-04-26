@@ -723,7 +723,18 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
             qr_data    = result["data"]
             qr_url     = qr_data.get("qr_url", "")
+            qr_b64     = qr_data.get("qr_b64", "")
             expires_at = qr_data.get("expires_at_ist", "5 minutes")
+
+            # Prefer raw bytes (works without any public URL — the microservice
+            # may be on localhost or behind a private network).
+            try:
+                import base64 as _b64
+                qr_photo = io.BytesIO(_b64.b64decode(qr_b64)) if qr_b64 else qr_url
+                if isinstance(qr_photo, io.BytesIO):
+                    qr_photo.name = f"{order_id}.png"
+            except Exception:
+                qr_photo = qr_url
 
             caption = (
                 f"<blockquote><b>{ce('card')} SCAN &amp; PAY ₹{price:.2f}</b></blockquote>\n\n"
@@ -745,7 +756,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 pass
             await context.bot.send_photo(
                 chat_id=user_id,
-                photo=qr_url,
+                photo=qr_photo,
                 caption=caption,
                 reply_markup=InlineKeyboardMarkup(buttons),
                 parse_mode=ParseMode.HTML,
@@ -1098,17 +1109,37 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             email   = db.get_setting("payment_svc_email", "Not set")
             is_active = bool(token)
 
+            # Probe the microservice for its auto-detected public base + health
+            svc_alive = False
+            public_base = "—"
+            auto_flag = ""
+            try:
+                async with aiohttp.ClientSession() as _s:
+                    async with _s.get(f"{svc_url}/health",
+                                      timeout=aiohttp.ClientTimeout(total=4)) as _r:
+                        if _r.status == 200:
+                            _j = await _r.json()
+                            svc_alive = _j.get("status") == "ok"
+                            public_base = _j.get("public_base", "—")
+                            auto_flag = " (auto-detected)" if _j.get("auto_detected") else ""
+            except Exception:
+                pass
+
             status_icon = ce('success') if is_active else ce('fail')
             status_text = "ACTIVE" if is_active else "NOT LOGGED IN"
+            svc_icon = ce('success') if svc_alive else ce('fail')
+            svc_label = "ONLINE" if svc_alive else "OFFLINE"
 
             text = (
                 f"<blockquote><b>{ce('session')} UPI PAYMENT SESSION</b></blockquote>\n\n"
-                f"<b>Status:</b> {status_icon} <b>{status_text}</b>\n"
-                f"<b>Service URL:</b> <code>{svc_url}</code>\n"
+                f"<b>Login Status:</b> {status_icon} <b>{status_text}</b>\n"
+                f"<b>Service Health:</b> {svc_icon} <b>{svc_label}</b>\n"
+                f"<b>Internal URL:</b> <code>{svc_url}</code>\n"
+                f"<b>Public URL{auto_flag}:</b>\n<code>{public_base}</code>\n"
                 f"<b>Mobile:</b> <code>{mobile}</code>\n"
                 f"<b>Email:</b> <code>{email}</code>\n"
                 f"{get_line(12)}\n"
-                f"<i>Login to start accepting automated UPI payments.</i>"
+                f"<i>Login with your Gmail App Password to start accepting automated UPI payments.</i>"
             )
             buttons = []
             if is_active:

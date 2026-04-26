@@ -58,7 +58,49 @@ log = logging.getLogger("payment_svc")
 # ──────────────────────────────────────────────────────────────────────────────
 HOST = os.environ.get("PAY_SVC_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PAY_SVC_PORT", "8000"))
-PUBLIC_BASE = os.environ.get("PAY_SVC_PUBLIC_BASE", f"http://localhost:{PORT}").rstrip("/")
+
+
+def _autodetect_public_base() -> str:
+    """Pick a sensible public base URL without admin configuration.
+
+    Priority:
+      1. PAY_SVC_PUBLIC_BASE                      (manual override)
+      2. RENDER_EXTERNAL_URL                      (Render hosting)
+      3. https://$RAILWAY_PUBLIC_DOMAIN           (Railway hosting)
+      4. https://$FLY_APP_NAME.fly.dev            (Fly.io)
+      5. https://$REPLIT_DEV_DOMAIN               (Replit dev preview)
+      6. https://$REPL_SLUG.$REPL_OWNER.repl.co   (legacy Replit URL)
+      7. http://localhost:<PORT>                  (last-resort fallback)
+    """
+    explicit = os.environ.get("PAY_SVC_PUBLIC_BASE", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if render_url:
+        return render_url
+
+    railway = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip().rstrip("/")
+    if railway:
+        return f"https://{railway}" if not railway.startswith(("http://", "https://")) else railway
+
+    fly = os.environ.get("FLY_APP_NAME", "").strip()
+    if fly:
+        return f"https://{fly}.fly.dev"
+
+    replit_dev = os.environ.get("REPLIT_DEV_DOMAIN", "").strip().rstrip("/")
+    if replit_dev:
+        return f"https://{replit_dev}" if not replit_dev.startswith(("http://", "https://")) else replit_dev
+
+    repl_slug = os.environ.get("REPL_SLUG", "").strip()
+    repl_owner = os.environ.get("REPL_OWNER", "").strip()
+    if repl_slug and repl_owner:
+        return f"https://{repl_slug}.{repl_owner}.repl.co"
+
+    return f"http://localhost:{PORT}"
+
+
+PUBLIC_BASE = _autodetect_public_base()
 QR_TTL_SECONDS = 5 * 60  # 5 minutes
 SESSION_TTL_DAYS = 30
 IST_TZ = timezone(timedelta(hours=5, minutes=30))
@@ -425,6 +467,8 @@ async def health(_request: web.Request) -> web.Response:
         "status": "ok",
         "service": "hack-store-payment-svc",
         "time": _now_ist_str(),
+        "public_base": PUBLIC_BASE,
+        "auto_detected": not bool(os.environ.get("PAY_SVC_PUBLIC_BASE", "").strip()),
     })
 
 
@@ -568,9 +612,11 @@ async def generate_qr(request: web.Request) -> web.Response:
 
     expires_at_ist = datetime.fromtimestamp(expires_at, IST_TZ).strftime("%H:%M IST")
     qr_url = f"{PUBLIC_BASE}/qr/{order_id}.png"
+    qr_b64 = base64.b64encode(png).decode("ascii")
     log.info("QR generated for order=%s amount=%.2f upi=%s", order_id, amount, upi_id)
     return _success({
         "qr_url": qr_url,
+        "qr_b64": qr_b64,
         "upi_link": upi_link,
         "amount": amount,
         "order_id": order_id,
