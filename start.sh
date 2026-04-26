@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
-# Production launcher: runs the payment microservice and the Telegram bot
-# together inside the same VM/process group.
+# Production launcher
 set -e
 
-cleanup() {
-  echo "[start.sh] shutting down…"
-  kill 0 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-
+echo "[start.sh] Starting Payment Service..."
 python payment_service.py &
 SVC_PID=$!
-echo "[start.sh] payment_service started (pid=$SVC_PID)"
 
-# Give the service a moment to bind its port before the bot makes any calls.
-sleep 2
+echo "[start.sh] Waiting for service to bind..."
+sleep 5
 
+echo "[start.sh] Starting Bot..."
 python bot.py &
 BOT_PID=$!
-echo "[start.sh] bot started (pid=$BOT_PID)"
 
-# Exit (and trigger cleanup) as soon as either child exits.
+# Wait for processes
 wait -n
+
+# If any process dies, kill the other and exit
+kill $SVC_PID $BOT_PID 2>/dev/null || true
