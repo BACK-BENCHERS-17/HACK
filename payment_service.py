@@ -147,11 +147,14 @@ _mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
 _db = _mongo[MONGO_DB_NAME]
 sessions_col = _db["payment_sessions"]
 orders_col = _db["payment_orders"]
+api_keys_col = _db["payment_api_keys"]
 
 sessions_col.create_index([("session_token", ASCENDING)], unique=True)
 sessions_col.create_index([("admin_id", ASCENDING)])
 orders_col.create_index([("order_id", ASCENDING)], unique=True)
 orders_col.create_index([("admin_id", ASCENDING)])
+api_keys_col.create_index([("api_key", ASCENDING)], unique=True)
+api_keys_col.create_index([("admin_id", ASCENDING)])
 
 # In-memory QR PNG cache (order_id -> bytes). Survives until process restart.
 _qr_cache: dict[str, bytes] = {}
@@ -715,17 +718,366 @@ async def verify_payment(request: web.Request) -> web.Response:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Public REST API (key-based) — same shape as third-party "FamPay" services
+# ──────────────────────────────────────────────────────────────────────────────
+def _new_api_key() -> str:
+    """Generate a fresh API key. Format: hsk_<48-char-urlsafe>."""
+    return "hsk_" + secrets.token_urlsafe(36).rstrip("=")[:48]
+
+
+def _get_api_key_record(api_key: str) -> Optional[dict]:
+    if not api_key or not api_key.startswith("hsk_"):
+        return None
+    rec = api_keys_col.find_one({"api_key": api_key})
+    if not rec or not rec.get("enabled", True):
+        return None
+    return rec
+
+
+def _api_key_param(request: web.Request) -> str:
+    """Accept api_key from query string OR `X-API-Key` header OR Bearer token."""
+    k = (request.query.get("api_key") or "").strip()
+    if k:
+        return k
+    k = (request.headers.get("X-API-Key") or "").strip()
+    if k:
+        return k
+    return _bearer_token(request)
+
+
+async def api_qr(request: web.Request) -> web.Response:
+    """
+    Public endpoint — generate a UPI QR code.
+
+    GET /qr.php?api_key=<key>&upi=<upi_id>&amount=<rupees>
+        &payee=<name>&order_id=<optional>&format=json|png
+
+    Returns JSON by default:
+      { "status": "success",
+        "data": { order_id, upi, upi_link, amount, qr_url,
+                  qr_image_b64, expires_at_ist } }
+
+    If `format=png`, returns the raw PNG image (image/png) — handy for
+    `<img src="…/qr.php?…&format=png">` embeds.
+    """
+    api_key = _api_key_param(request)
+    rec = _get_api_key_record(api_key)
+    if not rec:
+        return _err("Invalid or disabled api_key.", http_status=401)
+
+    upi_id = (request.query.get("upi") or request.query.get("upi_id") or "").strip()
+    if not upi_id or "@" not in upi_id:
+        return _err("Query parameter `upi` is required (e.g. yourname@bank).")
+
+    amount_raw = (request.query.get("amount") or request.query.get("amt") or "").strip()
+    try:
+        amount = float(amount_raw)
+    except Exception:
+        return _err("Query parameter `amount` must be a number (rupees).")
+    if amount <= 0:
+        return _err("amount must be greater than 0.")
+
+    payee_name = (request.query.get("payee") or request.query.get("payee_name")
+                  or rec.get("payee_name") or "Merchant").strip()[:40]
+
+    order_id = (request.query.get("order_id") or "").strip()
+    if not order_id:
+        order_id = "ORD" + secrets.token_hex(6).upper()
+
+    upi_link = _build_upi_link(upi_id, payee_name, amount, order_id)
+    png = _render_qr_png(upi_link)
+    _qr_cache[order_id] = png
+
+    expires_at = time.time() + QR_TTL_SECONDS
+    orders_col.update_one(
+        {"order_id": order_id},
+        {"$set": {
+            "order_id": order_id,
+            "admin_id": rec["admin_id"],
+            "api_key": api_key,
+            "upi_id": upi_id,
+            "payee_name": payee_name,
+            "amount": amount,
+            "upi_link": upi_link,
+            "status": "PENDING",
+            "created_at": time.time(),
+            "expires_at": expires_at,
+        }},
+        upsert=True,
+    )
+
+    api_keys_col.update_one(
+        {"_id": rec["_id"]},
+        {"$inc": {"qr_count": 1},
+         "$set": {"last_used_at": time.time()}},
+    )
+
+    fmt = (request.query.get("format") or "json").lower()
+    if fmt == "png":
+        return web.Response(
+            body=png,
+            content_type="image/png",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Order-Id": order_id,
+                "X-Expires-At": datetime.fromtimestamp(
+                    expires_at, IST_TZ).strftime("%H:%M IST"),
+            },
+        )
+
+    expires_at_ist = datetime.fromtimestamp(expires_at, IST_TZ).strftime("%H:%M IST")
+    qr_url = f"{PUBLIC_BASE}/qr/{order_id}.png"
+    log.info("API key=%s generated QR order=%s amount=%.2f upi=%s",
+             api_key[:14] + "…", order_id, amount, upi_id)
+    return _success({
+        "order_id": order_id,
+        "upi": upi_id,
+        "payee_name": payee_name,
+        "amount": amount,
+        "upi_link": upi_link,
+        "qr_url": qr_url,
+        "qr_png_url": f"{PUBLIC_BASE}/qr.php?api_key={api_key}&upi={upi_id}"
+                      f"&amount={amount}&order_id={order_id}&format=png",
+        "qr_image_b64": base64.b64encode(png).decode("ascii"),
+        "expires_at_ist": expires_at_ist,
+        "expires_in_seconds": QR_TTL_SECONDS,
+    })
+
+
+async def api_verify(request: web.Request) -> web.Response:
+    """
+    Public endpoint — verify a previously-generated order.
+
+    GET /verify.php?api_key=<key>&order_id=<id>
+
+    Response:
+      success → {status:"success", data:{order_id,amount,utr,
+                  transaction_id,verified_at_ist}}
+      pending → {status:"pending", message:"Payment not yet received."}
+      error   → {status:"error",  message:"…"}
+    """
+    api_key = _api_key_param(request)
+    rec = _get_api_key_record(api_key)
+    if not rec:
+        return _err("Invalid or disabled api_key.", http_status=401)
+
+    order_id = (request.query.get("order_id") or "").strip()
+    if not order_id:
+        return _err("Query parameter `order_id` is required.")
+
+    order = orders_col.find_one({"order_id": order_id})
+    if not order:
+        return _err("Order not found.")
+
+    if order.get("admin_id") != rec["admin_id"]:
+        return _err("This order does not belong to your api_key.", http_status=403)
+
+    if order.get("status") == "PAID":
+        return _success({
+            "order_id": order_id,
+            "amount": float(order.get("amount", 0)),
+            "utr": order.get("utr", "N/A"),
+            "transaction_id": order.get("transaction_id", "N/A"),
+            "verified_at_ist": order.get("verified_at_ist", ""),
+            "cached": True,
+        })
+
+    # Find admin's Gmail session to scan inbox
+    sess = sessions_col.find_one({"admin_id": rec["admin_id"]})
+    if not sess:
+        return _err(
+            "Owner of this api_key has not logged into the payment service "
+            "(no Gmail session). Login from the bot's Admin → UPI Session.")
+
+    app_password = _dec(sess.get("app_password_enc", ""))
+    if not app_password:
+        return _err("Stored Gmail credentials unreadable. Re-login from the bot.")
+
+    loop = asyncio.get_running_loop()
+    match = await loop.run_in_executor(
+        None,
+        _imap_find_payment,
+        sess["email"],
+        app_password,
+        order_id,
+        float(order["amount"]),
+        float(order.get("created_at", time.time() - 3600)),
+    )
+
+    api_keys_col.update_one(
+        {"_id": rec["_id"]},
+        {"$inc": {"verify_count": 1},
+         "$set": {"last_used_at": time.time()}},
+    )
+
+    if not match:
+        return web.json_response({
+            "status": "pending",
+            "message": "Payment not yet received.",
+            "order_id": order_id,
+        })
+
+    utr = match["utr"]
+    txn = match["transaction_id"]
+    verified_at = _now_ist_str()
+    orders_col.update_one(
+        {"_id": order["_id"]},
+        {"$set": {
+            "status": "PAID",
+            "utr": utr,
+            "transaction_id": txn,
+            "verified_at": time.time(),
+            "verified_at_ist": verified_at,
+            "matched_sender": match.get("sender", ""),
+            "matched_subject": match.get("subject", ""),
+        }},
+    )
+    log.info("API verified order=%s utr=%s sender=%s",
+             order_id, utr, match.get("sender", ""))
+    return _success({
+        "order_id": order_id,
+        "amount": float(order["amount"]),
+        "utr": utr,
+        "transaction_id": txn,
+        "verified_at_ist": verified_at,
+    })
+
+
+async def api_docs(_request: web.Request) -> web.Response:
+    """Plain-text API documentation."""
+    body = (
+        "Hack Store Payment API\n"
+        "======================\n\n"
+        f"Base URL: {PUBLIC_BASE}\n\n"
+        "All endpoints accept the API key as either:\n"
+        "  • ?api_key=<key>   (query string)\n"
+        "  • X-API-Key: <key> (header)\n"
+        "  • Authorization: Bearer <key>\n\n"
+        "1) Generate QR\n"
+        "   GET /qr.php?api_key=<KEY>&upi=<UPI_ID>&amount=<RUPEES>\n"
+        "       [&payee=<NAME>] [&order_id=<ID>] [&format=json|png]\n"
+        "   • Default format=json (returns base64 image).\n"
+        "   • format=png returns the raw PNG (use as <img src> directly).\n\n"
+        "2) Verify Payment\n"
+        "   GET /verify.php?api_key=<KEY>&order_id=<ID>\n"
+        "   • Returns status:success with utr/transaction_id when paid.\n"
+        "   • Returns status:pending while waiting.\n\n"
+        "Notes:\n"
+        "  • QR codes expire in 5 minutes.\n"
+        "  • Verification scans the API-key owner's Gmail inbox via IMAP for\n"
+        "    real UPI / FamPay / bank credit notifications matching the order\n"
+        "    amount or order id. No third-party service is used.\n"
+        "  • Save the order_id returned by /qr.php — you need it to verify.\n"
+    )
+    return web.Response(text=body, content_type="text/plain")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Internal admin endpoints used by the Telegram bot to manage API keys
+# (protected by the admin's session token, not the api_key itself).
+# ──────────────────────────────────────────────────────────────────────────────
+async def api_key_create(request: web.Request) -> web.Response:
+    token = _bearer_token(request)
+    sess = _get_session(token)
+    if not sess:
+        return _err("Invalid or expired session. Please login again.")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    label = (body.get("label") or "default").strip()[:40]
+    payee_name = (body.get("payee_name") or "Hack Store").strip()[:40]
+
+    key = _new_api_key()
+    api_keys_col.insert_one({
+        "api_key": key,
+        "admin_id": sess["admin_id"],
+        "label": label,
+        "payee_name": payee_name,
+        "enabled": True,
+        "created_at": time.time(),
+        "qr_count": 0,
+        "verify_count": 0,
+    })
+    log.info("API key created for admin_id=%s label=%s", sess["admin_id"], label)
+    return _success({
+        "api_key": key,
+        "label": label,
+        "payee_name": payee_name,
+        "docs_url": f"{PUBLIC_BASE}/docs",
+    })
+
+
+async def api_key_list(request: web.Request) -> web.Response:
+    token = _bearer_token(request)
+    sess = _get_session(token)
+    if not sess:
+        return _err("Invalid or expired session. Please login again.")
+    keys = list(api_keys_col.find({"admin_id": sess["admin_id"]}).sort("created_at", -1))
+    out = []
+    for k in keys:
+        out.append({
+            "api_key": k["api_key"],
+            "label": k.get("label", ""),
+            "enabled": bool(k.get("enabled", True)),
+            "qr_count": int(k.get("qr_count", 0)),
+            "verify_count": int(k.get("verify_count", 0)),
+            "created_at_ist": datetime.fromtimestamp(
+                k.get("created_at", 0), IST_TZ).strftime("%Y-%m-%d %H:%M IST"),
+            "last_used_at_ist": (
+                datetime.fromtimestamp(k["last_used_at"], IST_TZ)
+                .strftime("%Y-%m-%d %H:%M IST")
+                if k.get("last_used_at") else "—"
+            ),
+        })
+    return _success({"keys": out, "count": len(out)})
+
+
+async def api_key_revoke(request: web.Request) -> web.Response:
+    token = _bearer_token(request)
+    sess = _get_session(token)
+    if not sess:
+        return _err("Invalid or expired session. Please login again.")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    key = (body.get("api_key") or "").strip()
+    if not key:
+        return _err("api_key is required.")
+    res = api_keys_col.delete_one({"api_key": key, "admin_id": sess["admin_id"]})
+    if res.deleted_count == 0:
+        return _err("API key not found (or not yours).")
+    return _ok({"revoked": key})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # App factory + main
 # ──────────────────────────────────────────────────────────────────────────────
 def make_app() -> web.Application:
     app = web.Application()
+    # Health
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
+    # Internal (used by the Telegram bot itself)
     app.router.add_post("/login", login)
     app.router.add_post("/logout", logout)
     app.router.add_post("/generate_qr", generate_qr)
     app.router.add_post("/verify_payment", verify_payment)
     app.router.add_get("/qr/{order_id}.png", serve_qr)
+    # Internal API-key management (session-protected)
+    app.router.add_post("/api/keys/create", api_key_create)
+    app.router.add_get("/api/keys/list", api_key_list)
+    app.router.add_post("/api/keys/revoke", api_key_revoke)
+    # Public REST API — key-protected, third-party-style
+    app.router.add_get("/qr.php", api_qr)
+    app.router.add_get("/qr", api_qr)
+    app.router.add_get("/api/qr", api_qr)
+    app.router.add_get("/verify.php", api_verify)
+    app.router.add_get("/verify", api_verify)
+    app.router.add_get("/api/verify", api_verify)
+    app.router.add_get("/docs", api_docs)
+    app.router.add_get("/api/docs", api_docs)
     return app
 
 
