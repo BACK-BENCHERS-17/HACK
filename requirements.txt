@@ -1,7 +1,9 @@
-python-telegram-bot==21.6
+python-telegram-bot[job-queue]==21.6
+apscheduler==3.10.4
 pymongo==4.10.1
 dnspython==2.7.0
 python-dotenv==1.0.1
-aiohttp
-cryptography
-qrcode[pil]
+aiohttp==3.10.5
+cryptography==43.0.1
+qrcode[pil]==8.0
+tzlocal==5.2

@@ -320,7 +320,38 @@ async def svc_verify_payment(svc_url: str, token: str, admin_id: int, order_id: 
 def generate_order_id(plan_id: int, user_id: int) -> str:
     """Generate a unique order ID."""
     unique = uuid.uuid4().hex[:8].upper()
-    return f"HACK_{plan_id}_{user_id}_{unique}"
+    return f"HACK-{plan_id}-{user_id}-{unique}"
+
+
+async def qr_expiration_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job to delete an expired QR message and notify the user."""
+    job = context.job
+    chat_id = job.data["chat_id"]
+    message_id = job.data["message_id"]
+    order_id = job.data["order_id"]
+
+    # Check if order was already PAID to avoid deleting valid success screens
+    req = db.get_fund_request_by_order(order_id)
+    if req and req.get("status") == "PAID":
+        return
+
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"<blockquote><b>{ce('warning')} QR CODE EXPIRED</b></blockquote>\n\n"
+            f"The payment QR for Order ID <code>{order_id}</code> has expired (5 minute limit).\n"
+            f"If you still wish to purchase, please generate a new QR code from the store."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"{ce_button('back')} Back to Store", callback_data="user_buy_hack")
+        ]])
+    )
 
 
 # ==============================================================================
@@ -755,12 +786,23 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.message.delete()
             except Exception:
                 pass
-            await context.bot.send_photo(
+            msg = await context.bot.send_photo(
                 chat_id=user_id,
                 photo=qr_photo,
                 caption=caption,
                 reply_markup=InlineKeyboardMarkup(buttons),
                 parse_mode=ParseMode.HTML,
+            )
+
+            # Schedule expiration job (5 minutes = 300 seconds)
+            context.job_queue.run_once(
+                qr_expiration_job,
+                when=300,
+                data={
+                    "chat_id": user_id,
+                    "message_id": msg.message_id,
+                    "order_id": order_id
+                }
             )
 
         # ── Verify payment (user clicks I'VE PAID) ────────────────────────────
@@ -2621,4 +2663,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error("FATAL ERROR DURING STARTUP:")
+        logger.error(traceback.format_exc())
+        # Force flush logs
+        import sys
+        sys.stderr.flush()
+        sys.stdout.flush()

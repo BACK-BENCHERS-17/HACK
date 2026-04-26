@@ -58,7 +58,8 @@ log = logging.getLogger("payment_svc")
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 HOST = os.environ.get("PAY_SVC_HOST", "0.0.0.0")
-PORT = int(os.environ.get("PAY_SVC_PORT", "8000"))
+# Render and many other hosts set the 'PORT' environment variable.
+PORT = int(os.environ.get("PAY_SVC_PORT") or os.environ.get("PORT") or "8000")
 
 
 def _autodetect_public_base() -> str:
@@ -514,14 +515,14 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
 # ──────────────────────────────────────────────────────────────────────────────
 def _build_upi_link(upi_id: str, payee_name: str, amount: float, order_id: str) -> str:
     from urllib.parse import quote
+    # Standard UPI deep-link: pa=VPA, pn=Name, am=Amount, cu=Currency, tn=Note.
+    # We avoid quoting the '@' in the VPA for better scanner compatibility.
     return (
-        "upi://pay?"
-        f"pa={quote(upi_id)}"
+        f"upi://pay?pa={upi_id}"
         f"&pn={quote(payee_name)}"
         f"&am={amount:.2f}"
         "&cu=INR"
         f"&tn={quote(order_id)}"
-        f"&tr={quote(order_id)}"
     )
 
 
@@ -741,6 +742,10 @@ async def verify_payment(request: web.Request) -> web.Response:
     order = orders_col.find_one({"order_id": order_id, "admin_id": sess["admin_id"]})
     if not order:
         return _err("Order not found.")
+
+    # Check for expiration
+    if time.time() > order.get("expires_at", 0) and order.get("status") != "PAID":
+        return _err("Order has expired. Please generate a new QR code.")
 
     # Already verified earlier → return cached result
     if order.get("status") == "PAID":
