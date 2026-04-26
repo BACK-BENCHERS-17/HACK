@@ -284,14 +284,13 @@ async def svc_login(svc_url: str, admin_id: int, mobile: str, email: str, otp: s
         return {"status": "error", "message": str(e)}
 
 
-async def svc_generate_qr(svc_url: str, token: str, admin_id: int, amount: float,
+async def svc_generate_qr(svc_url: str, token: str, amount: float,
                           order_id: str, upi_id: str, payee_name: str = "Hack Store") -> dict:
     """Call POST /generate_qr on the payment microservice."""
     try:
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {token}"}
             payload = {
-                "admin_id": admin_id,
                 "amount": amount,
                 "order_id": order_id,
                 "upi_id": upi_id,
@@ -304,12 +303,12 @@ async def svc_generate_qr(svc_url: str, token: str, admin_id: int, amount: float
         return {"status": "error", "message": str(e)}
 
 
-async def svc_verify_payment(svc_url: str, token: str, admin_id: int, order_id: str) -> dict:
+async def svc_verify_payment(svc_url: str, token: str, order_id: str) -> dict:
     """Call POST /verify_payment on the payment microservice."""
     try:
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {token}"}
-            payload = {"admin_id": admin_id, "order_id": order_id}
+            payload = {"order_id": order_id}
             async with session.post(f"{svc_url}/verify_payment", json=payload, headers=headers,
                                     timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 return await resp.json()
@@ -739,9 +738,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             db.create_fund_request_with_order(user_id, order_id, plan_id, plan['price'])
 
             # Call microservice
-            admin_id = ADMIN_IDS[0] if ADMIN_IDS else 0
             payee = db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
-            result = await svc_generate_qr(svc_url, svc_token, admin_id, price, order_id, admin_upi, payee)
+            result = await svc_generate_qr(svc_url, svc_token, price, order_id, admin_upi, payee)
 
             if result.get("status") != "success":
                 err = result.get("message", "Unknown error")
@@ -811,9 +809,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             order_id  = data[len("verify_pay_"):]
             svc_url   = db.get_setting("payment_svc_url", "http://localhost:8000")
             svc_token = db.get_setting("payment_svc_token", "")
-            admin_id  = ADMIN_IDS[0] if ADMIN_IDS else 0
 
-            result = await svc_verify_payment(svc_url, svc_token, admin_id, order_id)
+            result = await svc_verify_payment(svc_url, svc_token, order_id)
 
             if result.get("status") == "success":
                 pay_data = result["data"]
