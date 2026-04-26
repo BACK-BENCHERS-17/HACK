@@ -777,6 +777,10 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 pay_data = result["data"]
                 utr = pay_data.get("utr", "N/A")
                 txn_id = pay_data.get("transaction_id", "N/A")
+                sender_name = pay_data.get("sender_name", "Unknown")
+                paid_amount = pay_data.get("amount", 0)
+                payment_time = pay_data.get("payment_time_ist", "")
+                upi_id_paid = pay_data.get("upi_id", "")
 
                 # Get fund_request to find plan_id
                 req = db.get_fund_request_by_order(order_id)
@@ -784,10 +788,56 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     await query.answer("Order not found. Contact support.", show_alert=True)
                     return
 
+                # Anti-replay: if this UTR is already attached to a different
+                # order in our own DB, refuse delivery and alert admins.
+                if utr and utr != "N/A" and db.is_utr_already_used(utr, except_order_id=order_id):
+                    db.update_fund_request_by_order(order_id, "REJECTED_DUPLICATE_UTR",
+                                                   utr=utr, transaction_id=txn_id,
+                                                   sender_name=sender_name,
+                                                   payment_time=payment_time)
+                    await safe_edit_text(
+                        update, context,
+                        f"<blockquote>{ce('fail')} <b>This payment reference (UTR) "
+                        f"has already been used to claim a key.</b>\n\n"
+                        f"Each payment can be used only once. If this is a "
+                        f"genuine new payment, please contact support with the "
+                        f"order ID below.\n\n<code>{order_id}</code></blockquote>",
+                        back_kb("user_main"),
+                    )
+                    # Loud alert to admins about replay attempt
+                    user_obj = db.get_user(user_id)
+                    uname = (user_obj.get("username") or "").lstrip("@")
+                    fname = user_obj.get("first_name") or ""
+                    for admin in ADMIN_IDS:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=admin,
+                                text=(
+                                    f"<blockquote><b>{ce('siren')} UTR REPLAY BLOCKED</b></blockquote>\n"
+                                    f"<b>User:</b> <code>{user_id}</code> "
+                                    f"({fname} @{uname})\n"
+                                    f"<b>Order:</b> <code>{order_id}</code>\n"
+                                    f"<b>Tried UTR:</b> <code>{utr}</code>\n"
+                                    f"<b>Txn:</b> <code>{txn_id}</code>\n"
+                                    f"<b>Sender:</b> {sender_name}\n"
+                                    f"<i>This UTR was already used by another "
+                                    f"order. No key was delivered.</i>"
+                                ),
+                                parse_mode=ParseMode.HTML,
+                            )
+                        except Exception:
+                            pass
+                    return
+
                 # Deliver key automatically
                 success, msg, info = db.purchase_key_automated(user_id, req["plan_id"])
                 if success:
-                    db.update_fund_request_by_order(order_id, "APPROVED")
+                    db.update_fund_request_by_order(
+                        order_id, "APPROVED",
+                        utr=utr, transaction_id=txn_id,
+                        sender_name=sender_name, payment_time=payment_time,
+                        key_value=info.get("key"),
+                    )
 
                     key_text = (
                         f"<blockquote><b>{ce('success')} PAYMENT VERIFIED! {ce('star')}</b></blockquote>\n\n"
@@ -810,17 +860,33 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML,
                     )
 
-                    # Notify admins
+                    # Detailed admin notification
+                    user_obj = db.get_user(user_id)
+                    uname = (user_obj.get("username") or "").lstrip("@")
+                    fname = user_obj.get("first_name") or ""
+                    plan_obj = db.get_plan(req["plan_id"]) or {}
+                    expected_amount = plan_obj.get("price", paid_amount)
                     for admin in ADMIN_IDS:
                         try:
                             await context.bot.send_message(
                                 chat_id=admin,
                                 text=(
-                                    f"<blockquote><b>{ce('success')} AUTO PAYMENT SUCCESS</b></blockquote>\n"
-                                    f"User: <code>{user_id}</code>\n"
-                                    f"Order: <code>{order_id}</code>\n"
-                                    f"UTR: <code>{utr}</code>\n"
-                                    f"Key: <code>{info['key']}</code>"
+                                    f"<blockquote><b>{ce('success')} AUTO PAYMENT SUCCESS — KEY DELIVERED</b></blockquote>\n"
+                                    f"{get_line(12)}\n"
+                                    f"<b>{ce('user')} User:</b> <code>{user_id}</code> "
+                                    f"({fname} @{uname})\n"
+                                    f"<b>{ce('card')} Order:</b> <code>{order_id}</code>\n"
+                                    f"<b>{ce('money')} Amount:</b> ₹{expected_amount}\n"
+                                    f"<b>{ce('bag')} Product:</b> {info['product']} — {info['duration']}\n"
+                                    f"{get_line(12)}\n"
+                                    f"<b>UTR:</b> <code>{utr}</code>\n"
+                                    f"<b>Txn ID:</b> <code>{txn_id}</code>\n"
+                                    f"<b>Sender:</b> {sender_name}\n"
+                                    f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
+                                    f"<b>Payment Time:</b> {payment_time}\n"
+                                    f"{get_line(12)}\n"
+                                    f"<b>{ce('key')} Delivered Key:</b>\n<code>{info['key']}</code>\n"
+                                    f"<b>{ce('time')} Expiry:</b> {info['expiry'][:10]}"
                                 ),
                                 parse_mode=ParseMode.HTML,
                             )
@@ -828,13 +894,54 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                             pass
                 else:
                     # Payment verified but key delivery failed (out of stock etc.)
-                    db.update_fund_request_by_order(order_id, "PAID_NO_STOCK")
+                    db.update_fund_request_by_order(
+                        order_id, "PAID_NO_STOCK",
+                        utr=utr, transaction_id=txn_id,
+                        sender_name=sender_name, payment_time=payment_time,
+                    )
                     await safe_edit_text(
                         update, context,
                         f"<blockquote>{ce('warning')} <b>Payment received but key delivery failed: {msg}</b>\n\n"
                         f"Please contact support with your Order ID:\n<code>{order_id}</code></blockquote>",
                         back_kb("user_main"),
                     )
+                    # Urgent admin alert — money received, no key delivered
+                    user_obj = db.get_user(user_id)
+                    uname = (user_obj.get("username") or "").lstrip("@")
+                    fname = user_obj.get("first_name") or ""
+                    for admin in ADMIN_IDS:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=admin,
+                                text=(
+                                    f"<blockquote><b>{ce('siren')} PAYMENT RECEIVED — DELIVERY FAILED</b></blockquote>\n"
+                                    f"<b>Reason:</b> {msg}\n"
+                                    f"{get_line(12)}\n"
+                                    f"<b>User:</b> <code>{user_id}</code> "
+                                    f"({fname} @{uname})\n"
+                                    f"<b>Order:</b> <code>{order_id}</code>\n"
+                                    f"<b>Amount:</b> ₹{paid_amount}\n"
+                                    f"<b>UTR:</b> <code>{utr}</code>\n"
+                                    f"<b>Txn:</b> <code>{txn_id}</code>\n"
+                                    f"<b>Sender:</b> {sender_name}\n"
+                                    f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
+                                    f"<b>Time:</b> {payment_time}\n"
+                                    f"<i>Please refund or top-up stock and "
+                                    f"deliver manually.</i>"
+                                ),
+                                parse_mode=ParseMode.HTML,
+                            )
+                        except Exception:
+                            pass
+            elif "already been used" in (result.get("message") or "").lower():
+                # Service-side replay rejection
+                await safe_edit_text(
+                    update, context,
+                    f"<blockquote>{ce('fail')} <b>This payment reference has "
+                    f"already been used.</b>\n\nPlease make a fresh payment "
+                    f"to claim a new key.\n\n<b>Order:</b> <code>{order_id}</code></blockquote>",
+                    back_kb("user_main"),
+                )
             else:
                 # Not paid yet
                 buttons = [
@@ -1213,9 +1320,29 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 if result.get("status") == "success":
                     pay_data = result["data"]
                     utr = pay_data.get("utr", "N/A")
+                    txn_id = pay_data.get("transaction_id", "N/A")
+                    sender_name = pay_data.get("sender_name", "Unknown")
+                    payment_time = pay_data.get("payment_time_ist", "")
+
+                    # Anti-replay check before delivery
+                    if utr and utr != "N/A" and db.is_utr_already_used(utr, except_order_id=order_id):
+                        db.update_fund_request_by_order(
+                            order_id, "REJECTED_DUPLICATE_UTR",
+                            utr=utr, transaction_id=txn_id,
+                            sender_name=sender_name, payment_time=payment_time,
+                        )
+                        failed += 1
+                        await asyncio.sleep(0.3)
+                        continue
+
                     success, msg, info = db.purchase_key_automated(req["user_id"], req["plan_id"])
                     if success:
-                        db.update_fund_request_by_order(order_id, "APPROVED")
+                        db.update_fund_request_by_order(
+                            order_id, "APPROVED",
+                            utr=utr, transaction_id=txn_id,
+                            sender_name=sender_name, payment_time=payment_time,
+                            key_value=info.get("key"),
+                        )
                         delivered += 1
                         try:
                             await context.bot.send_message(
@@ -1237,7 +1364,11 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                         except Exception:
                             pass
                     else:
-                        db.update_fund_request_by_order(order_id, "PAID_NO_STOCK")
+                        db.update_fund_request_by_order(
+                            order_id, "PAID_NO_STOCK",
+                            utr=utr, transaction_id=txn_id,
+                            sender_name=sender_name, payment_time=payment_time,
+                        )
                         failed += 1
                 else:
                     not_paid += 1

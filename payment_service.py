@@ -41,6 +41,7 @@ import qrcode
 from aiohttp import web
 from cryptography.fernet import Fernet, InvalidToken
 from pymongo import ASCENDING, MongoClient
+from pymongo.errors import DuplicateKeyError
 
 from config import BOT_TOKEN, MONGO_DB_NAME, MONGO_URI
 
@@ -152,6 +153,13 @@ sessions_col.create_index([("session_token", ASCENDING)], unique=True)
 sessions_col.create_index([("admin_id", ASCENDING)])
 orders_col.create_index([("order_id", ASCENDING)], unique=True)
 orders_col.create_index([("admin_id", ASCENDING)])
+# UTR / Transaction-ID replay protection — sparse so PENDING orders
+# (which have no UTR yet) don't collide.
+try:
+    orders_col.create_index([("utr", ASCENDING)], unique=True, sparse=True)
+    orders_col.create_index([("transaction_id", ASCENDING)], unique=True, sparse=True)
+except Exception as _e:
+    log.warning("Could not create UTR/txn unique indexes (existing duplicates?): %s", _e)
 
 # In-memory QR PNG cache (order_id -> bytes). Survives until process restart.
 _qr_cache: dict[str, bytes] = {}
@@ -361,11 +369,24 @@ def _amount_matches(text: str, expected: float) -> bool:
 
 
 def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
-                       amount: float, since_ts: float) -> Optional[dict]:
-    """Search Gmail inbox for a credit notification matching the order.
+                       amount: float, order_created_ts: float,
+                       used_utrs: Optional[set] = None) -> Optional[dict]:
+    """Search Gmail inbox for a credit notification matching THIS order.
 
-    Returns dict {utr, transaction_id, sender, subject} on match, else None.
+    Anti-replay rules (all enforced):
+      • Email's own Date header must be >= order_created_ts - 120s
+        (so an old payment email cannot satisfy a fresh order).
+      • Either the order_id appears in the email body, OR the amount
+        matches exactly (and we still require email date >= order time).
+      • The extracted UTR / Transaction Id must NOT already be present
+        in `used_utrs` (caller passes UTRs already attached to other
+        orders). If it is, this email is silently skipped.
+
+    Returns dict {utr, transaction_id, sender_name, sender, subject,
+    payment_time_ist} on match, else None.
     """
+    used_utrs = used_utrs or set()
+
     try:
         m = imaplib.IMAP4_SSL("imap.gmail.com", 993)
     except Exception as e:
@@ -384,11 +405,17 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
 
     try:
         m.select("INBOX")
-        # Search since the order was created (UTC date)
-        since_date = datetime.fromtimestamp(max(since_ts - 86400, 0)).strftime("%d-%b-%Y")
+        # Look only at emails from the same DAY (UTC) as the order, with
+        # one-day backward tolerance for orders placed near midnight.
+        since_anchor = max(order_created_ts - 3600, 0)
+        since_date = datetime.fromtimestamp(since_anchor).strftime("%d-%b-%Y")
         typ, data = m.search(None, f'(SINCE "{since_date}")')
         if typ != "OK" or not data or not data[0]:
             return None
+
+        # Anti-replay tolerance window: email must be no older than
+        # order_created_ts minus 120 seconds (clock skew + delivery race).
+        min_email_ts = order_created_ts - 120
 
         ids = data[0].split()
         # Newest first, cap to last 80 messages for speed
@@ -404,6 +431,17 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
 
             # Sender filter
             if not any(s in sender for s in PAYMENT_SENDERS):
+                continue
+
+            # Anti-replay: enforce that the email itself was received
+            # AFTER the order was placed.
+            try:
+                from email.utils import parsedate_to_datetime
+                email_dt = parsedate_to_datetime(msg.get("Date", ""))
+                email_ts = email_dt.timestamp() if email_dt else 0.0
+            except Exception:
+                email_ts = 0.0
+            if email_ts and email_ts < min_email_ts:
                 continue
 
             body = _email_text(msg)
@@ -426,20 +464,41 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
             mt = TXN_RE.search(scan)
             ms = SENDER_RE.search(scan)
 
-            utr = mu.group(1) if mu else ""
-            txn = mt.group(1) if mt else (utr or "")
+            utr = (mu.group(1) if mu else "").strip()
+            txn = (mt.group(1) if mt else "").strip() or utr
             sender_name = ""
             if ms:
                 sender_name = ms.group(1).strip()
                 # Cleanup: strip "your" / "the" / quotes
                 sender_name = re.sub(r"^(your|the)\s+", "", sender_name, flags=re.I).strip(" .,'\"")
 
+            # Anti-replay: skip if this UTR/txn was already attached to
+            # any earlier order (the caller supplied the blocklist).
+            if utr and utr in used_utrs:
+                log.warning("Skipping email for order=%s — UTR %s already used elsewhere",
+                            order_id, utr)
+                continue
+            if txn and txn in used_utrs:
+                log.warning("Skipping email for order=%s — Txn %s already used elsewhere",
+                            order_id, txn)
+                continue
+
+            payment_time_ist = ""
+            try:
+                if email_ts:
+                    payment_time_ist = datetime.fromtimestamp(
+                        email_ts, IST_TZ).strftime("%d-%m-%Y %H:%M:%S")
+            except Exception:
+                pass
+
             return {
-                "utr": utr or "AUTO-VERIFIED",
-                "transaction_id": txn or msg.get("Message-Id", "").strip("<>") or "AUTO-VERIFIED",
+                "utr": utr or f"AUTO-{order_id[-8:]}",
+                "transaction_id": txn or msg.get("Message-Id", "").strip("<>") or f"AUTO-{order_id[-8:]}",
                 "sender_name": sender_name or "Unknown",
                 "sender": sender,
                 "subject": subject,
+                "payment_time_ist": payment_time_ist,
+                "email_ts": email_ts,
             }
     finally:
         try:
@@ -697,6 +756,19 @@ async def verify_payment(request: web.Request) -> web.Response:
     if not app_password:
         return _err("Stored credentials are unreadable. Please login again.")
 
+    # Anti-replay: collect every UTR / Txn already used by this admin's
+    # other PAID orders, and refuse to credit them again.
+    used_utrs: set = set()
+    for prev in orders_col.find(
+        {"admin_id": sess["admin_id"], "status": "PAID",
+         "order_id": {"$ne": order_id}},
+        {"utr": 1, "transaction_id": 1, "_id": 0},
+    ):
+        if prev.get("utr"):
+            used_utrs.add(str(prev["utr"]).strip())
+        if prev.get("transaction_id"):
+            used_utrs.add(str(prev["transaction_id"]).strip())
+
     loop = asyncio.get_running_loop()
     match = await loop.run_in_executor(
         None,
@@ -705,7 +777,8 @@ async def verify_payment(request: web.Request) -> web.Response:
         app_password,
         order_id,
         float(order["amount"]),
-        float(order.get("created_at", time.time() - 3600)),
+        float(order.get("created_at", time.time() - 600)),
+        used_utrs,
     )
 
     if not match:
@@ -715,21 +788,32 @@ async def verify_payment(request: web.Request) -> web.Response:
     txn = match["transaction_id"]
     sender_name = match.get("sender_name", "Unknown")
     verified_at = _now_ist_str()
-    payment_time_ist = datetime.now(IST_TZ).strftime("%d-%m-%Y %H:%M:%S")
-    orders_col.update_one(
-        {"_id": order["_id"]},
-        {"$set": {
-            "status": "PAID",
-            "utr": utr,
-            "transaction_id": txn,
-            "sender_name": sender_name,
-            "verified_at": time.time(),
-            "verified_at_ist": verified_at,
-            "payment_time_ist": payment_time_ist,
-            "matched_sender": match.get("sender", ""),
-            "matched_subject": match.get("subject", ""),
-        }},
-    )
+    payment_time_ist = (match.get("payment_time_ist")
+                        or datetime.now(IST_TZ).strftime("%d-%m-%Y %H:%M:%S"))
+
+    # Final defence — even if the IMAP scanner missed it, the unique
+    # sparse index on `utr` will reject a duplicate write below.
+    try:
+        orders_col.update_one(
+            {"_id": order["_id"]},
+            {"$set": {
+                "status": "PAID",
+                "utr": utr,
+                "transaction_id": txn,
+                "sender_name": sender_name,
+                "verified_at": time.time(),
+                "verified_at_ist": verified_at,
+                "payment_time_ist": payment_time_ist,
+                "matched_sender": match.get("sender", ""),
+                "matched_subject": match.get("subject", ""),
+            }},
+        )
+    except DuplicateKeyError:
+        log.warning("UTR replay blocked at write: order=%s utr=%s txn=%s",
+                    order_id, utr, txn)
+        return _err("This payment reference has already been used. "
+                    "Please make a fresh payment.")
+
     log.info("Verified order=%s utr=%s from=%s sender_email=%s",
              order_id, utr, sender_name, match.get("sender", ""))
     return _success({
@@ -739,6 +823,8 @@ async def verify_payment(request: web.Request) -> web.Response:
         "amount": float(order["amount"]),
         "verified_at_ist": verified_at,
         "payment_time_ist": payment_time_ist,
+        "upi_id": order.get("upi_id", ""),
+        "payee_name": order.get("payee_name", ""),
     })
 
 

@@ -45,7 +45,10 @@ class DatabaseManager:
         try:
             self.db.products.create_index("name", unique=True)
             self.db.keys.create_index("key_value", unique=True)
-            self.db.fund_requests.create_index("utr", unique=True)
+            # UTR must be globally unique (replay protection) but allow many
+            # PENDING orders that have not yet captured a UTR (sparse).
+            self.db.fund_requests.create_index("utr", unique=True, sparse=True)
+            self.db.fund_requests.create_index("order_id", unique=True, sparse=True)
             self.db.users.create_index("verified")
             self.db.users.create_index("total_spent")
             self.db.plans.create_index("product_id")
@@ -484,6 +487,93 @@ class DatabaseManager:
 
     def get_fund_request(self, req_id: int) -> dict:
         return self._wrap(self.db.fund_requests.find_one({"_id": int(req_id)}))
+
+    # ------------------------------------------------------------------
+    # Order-id based fund requests (used by the auto-UPI flow)
+    # ------------------------------------------------------------------
+    def create_fund_request_with_order(self, user_id: int, order_id: str,
+                                       plan_id: int, amount: float) -> bool:
+        """Create a PENDING fund request bound to a UPI order id (no UTR yet)."""
+        with self.lock:
+            if self.db.fund_requests.find_one({"order_id": order_id}):
+                return False
+            try:
+                _id = self._next_id("fund_requests")
+                self.db.fund_requests.insert_one({
+                    "_id": _id,
+                    "user_id": user_id,
+                    "order_id": order_id,
+                    "plan_id": int(plan_id) if plan_id is not None else None,
+                    "amount_requested": float(amount),
+                    "utr": None,
+                    "transaction_id": None,
+                    "sender_name": None,
+                    "payment_time": None,
+                    "status": "PENDING",
+                    "request_date": datetime.now().isoformat(),
+                    "resolved_date": None,
+                })
+                return True
+            except DuplicateKeyError:
+                return False
+
+    def get_fund_request_by_order(self, order_id: str) -> dict:
+        return self._wrap(self.db.fund_requests.find_one({"order_id": order_id}))
+
+    def update_fund_request_by_order(self, order_id: str, status: str,
+                                     utr: Optional[str] = None,
+                                     transaction_id: Optional[str] = None,
+                                     sender_name: Optional[str] = None,
+                                     payment_time: Optional[str] = None,
+                                     key_value: Optional[str] = None) -> bool:
+        """Update a fund request found by order_id; returns False if a
+        duplicate UTR collision is detected (replay protection)."""
+        with self.lock:
+            sets = {"status": status,
+                    "resolved_date": datetime.now().isoformat()}
+            if transaction_id is not None:
+                sets["transaction_id"] = transaction_id
+            if sender_name is not None:
+                sets["sender_name"] = sender_name
+            if payment_time is not None:
+                sets["payment_time"] = payment_time
+            if key_value is not None:
+                sets["delivered_key"] = key_value
+            if utr:
+                sets["utr"] = utr
+                # Replay check: ensure this UTR isn't already attached to a
+                # different fund request.
+                clash = self.db.fund_requests.find_one({
+                    "utr": utr,
+                    "order_id": {"$ne": order_id},
+                })
+                if clash:
+                    logger.warning(
+                        "UTR replay blocked: utr=%s already used by order=%s "
+                        "(attempted by order=%s)",
+                        utr, clash.get("order_id"), order_id,
+                    )
+                    return False
+            try:
+                self.db.fund_requests.update_one(
+                    {"order_id": order_id},
+                    {"$set": sets},
+                )
+                return True
+            except DuplicateKeyError:
+                logger.warning("UTR duplicate-key on update for order=%s utr=%s",
+                               order_id, utr)
+                return False
+
+    def is_utr_already_used(self, utr: str,
+                            except_order_id: Optional[str] = None) -> bool:
+        """True if `utr` is already recorded against a different order."""
+        if not utr:
+            return False
+        q = {"utr": utr}
+        if except_order_id:
+            q["order_id"] = {"$ne": except_order_id}
+        return self.db.fund_requests.find_one(q) is not None
 
     # ------------------------------------------------------------------
     # Tickets

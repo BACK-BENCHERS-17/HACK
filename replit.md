@@ -28,6 +28,19 @@ A self-hosted, **real** Gmail-IMAP-backed UPI payment service. No fake/mock — 
 - **`POST /login`** — body `{admin_id, mobile, email, otp}` (the `otp` field carries the 16-character Gmail App Password). The service performs a real IMAP login against `imap.gmail.com:993` to validate credentials. On success, returns a real `session_token` and stores the session (with the password Fernet-encrypted) in the `payment_sessions` MongoDB collection.
 - **`POST /generate_qr`** — body `{admin_id, amount, order_id, upi_id, payee_name?}`, header `Authorization: Bearer <session_token>`. Builds a standard UPI deep link (`upi://pay?...`) and renders a real PNG QR code. Returns `qr_url` pointing to `/qr/<order_id>.png` plus `expires_at_ist`. Order is stored in `payment_orders`.
 - **`POST /verify_payment`** — body `{admin_id, order_id}`, header `Authorization: Bearer <session_token>`. Connects to the admin's Gmail inbox via IMAP, scans recent messages from known UPI/bank senders (FamPay, HDFC, Axis, ICICI, SBI, Kotak, Yes, PhonePe, Paytm, Razorpay, Cashfree, Google Pay…) and looks for a "credited"/"received" notification matching either the order id or the amount. On match it extracts UTR/Txn ID and marks the order `PAID`.
+
+### UTR replay protection (anti-fraud)
+
+Old UTRs cannot be reused to claim free keys. The defence has four layers:
+
+1. **Email-date check** — `_imap_find_payment` rejects any email whose `Date:` header is older than `order.created_at - 120s`. An old payment email therefore cannot satisfy a fresh order.
+2. **Used-UTR blocklist (in-memory)** — before scanning, `verify_payment` builds a `set` of every UTR / transaction-id already attached to that admin's other `PAID` orders and passes it to the IMAP scanner; matching emails whose UTR is in the set are skipped.
+3. **Unique sparse Mongo indexes** — both `payment_orders.utr` and `payment_orders.transaction_id` (in the payment service DB) and `fund_requests.utr` / `fund_requests.order_id` (in the bot DB) are `unique=True, sparse=True`. A duplicate UTR write raises `DuplicateKeyError` and the user receives a clear "already used" message.
+4. **Bot-side recheck** — after the service confirms a payment, `bot.py` calls `db.is_utr_already_used(utr, except_order_id=…)` against its own `fund_requests` collection. On a hit, no key is delivered and a `🚨 UTR REPLAY BLOCKED` alert is sent to all admins with full user / order / UTR details.
+
+### Admin payment notification
+
+On a successful key delivery the bot sends every admin a detailed message with: user id + first name + @username, order id, amount, product + duration, UTR, transaction id, sender name, payee UPI id, payment time (IST), delivered key value, and key expiry. A separate alert is fired when payment was received but key delivery failed (out of stock).
 - **`GET /qr/<order_id>.png`** — serves the rendered QR image (in-memory cache + DB fallback).
 - **Encryption**: App passwords are encrypted with Fernet using a key derived from `BOT_TOKEN` (or override with `PAY_SVC_FERNET_KEY`).
 - **Public base URL auto-detection** — `PUBLIC_BASE` is picked automatically (in this priority order):
