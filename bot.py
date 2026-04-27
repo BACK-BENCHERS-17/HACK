@@ -162,7 +162,9 @@ def get_line(n: int = 12) -> str:
     WAIT_FOR_SVC_URL,
     # NEW: Reseller states
     WAIT_FOR_RESELLER_USER, WAIT_FOR_RESELLER_DAYS, WAIT_FOR_RESELLER_DISCOUNT,
-) = range(35)
+    # NEW: Add fund state
+    WAIT_FOR_ADD_FUND_AMT,
+) = range(36)
 
 
 # ==============================================================================
@@ -500,11 +502,12 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary"),
          InlineKeyboardButton("DOWNLOAD APK", callback_data="user_downloads", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary")],
-        [InlineKeyboardButton("MY KEY", callback_data="user_my_keys_0", icon_custom_emoji_id=EMOJIS["key"][1], style="primary"),
-         InlineKeyboardButton("STOCK", callback_data="user_stock", icon_custom_emoji_id=EMOJIS["stock"][1], style="primary")],
-        [InlineKeyboardButton("PROFILE", callback_data="user_profile", icon_custom_emoji_id=EMOJIS["user"][1], style="primary"),
-         InlineKeyboardButton("HOW TO USE", callback_data="user_how_to", icon_custom_emoji_id=EMOJIS["mobile"][1], style="primary")],
-        [InlineKeyboardButton("SUPPORT", callback_data="user_contact", icon_custom_emoji_id=EMOJIS["contact"][1], style="primary")],
+        [InlineKeyboardButton("ADD FUND", callback_data="user_add_funds", icon_custom_emoji_id=EMOJIS["money"][1], style="success"),
+         InlineKeyboardButton("MY KEY", callback_data="user_my_keys_0", icon_custom_emoji_id=EMOJIS["key"][1], style="primary")],
+        [InlineKeyboardButton("STOCK", callback_data="user_stock", icon_custom_emoji_id=EMOJIS["stock"][1], style="primary"),
+         InlineKeyboardButton("PROFILE", callback_data="user_profile", icon_custom_emoji_id=EMOJIS["user"][1], style="primary")],
+        [InlineKeyboardButton("HOW TO USE", callback_data="user_how_to", icon_custom_emoji_id=EMOJIS["mobile"][1], style="primary"),
+         InlineKeyboardButton("SUPPORT", callback_data="user_contact", icon_custom_emoji_id=EMOJIS["contact"][1], style="primary")],
     ])
 
 
@@ -716,10 +719,16 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"{get_line(12)}\n"
                 f"<i>Click below to generate your unique payment QR code (valid 5 min).</i>"
             )
-            buttons = [
-                [InlineKeyboardButton("GENERATE PAYMENT QR", callback_data=f"gen_qr_{plan_id}", icon_custom_emoji_id=EMOJIS["pay"][1], style="primary")],
-                [InlineKeyboardButton("CANCEL", callback_data=f"buy_prod_{plan['product_id']}", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")],
-            ]
+            buttons = []
+            user_data = db.get_user(user_id)
+            user_bal = user_data.get("balance", 0)
+            
+            if user_bal >= final_price:
+                buttons.append([InlineKeyboardButton("PAY VIA WALLET BALANCE", callback_data=f"pay_bal_{plan_id}", icon_custom_emoji_id=EMOJIS["money"][1], style="success")])
+            
+            buttons.append([InlineKeyboardButton("GENERATE PAYMENT QR", callback_data=f"gen_qr_{plan_id}", icon_custom_emoji_id=EMOJIS["pay"][1], style="primary")])
+            buttons.append([InlineKeyboardButton("CANCEL", callback_data=f"buy_prod_{plan['product_id']}", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")])
+            
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         # ── Generate QR via microservice ───────────────────────────────────────
@@ -1144,7 +1153,11 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<b>{ce('key')} Keys:</b> {keys_count}\n\n"
                 f"<i>Note: Profile fetches your current Telegram Photo.</i>"
             )
-            kb = back_kb("user_main")
+            buttons = [
+                [InlineKeyboardButton("ADD FUND", callback_data="user_add_funds", icon_custom_emoji_id=EMOJIS["money"][1], style="success")],
+                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+            ]
+            kb = InlineKeyboardMarkup(buttons)
             try:
                 photos = await context.bot.get_user_profile_photos(user_id, limit=1)
                 photo_id = (
@@ -1203,6 +1216,80 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     text += f"  ├ <b>{pl['duration']}: {pl['count']} keys</b>\n"
                 text += "\n"
             await safe_edit_text(update, context, text, back_kb("user_main"))
+
+        # ── Add Funds ──────────────────────────────────────────────────────────
+        elif data == "user_add_funds":
+            await query.answer()
+            await safe_edit_text(
+                update, context,
+                f"<blockquote><b>{ce('money')} ADD FUNDS TO WALLET</b></blockquote>\n\n"
+                f"Enter the amount in ₹ you wish to add to your wallet.\n"
+                f"<i>(Example: 100)</i>",
+                cancel_kb()
+            )
+            return WAIT_FOR_ADD_FUND_AMT
+
+        # ── Pay via Balance ────────────────────────────────────────────────────
+        elif data.startswith("pay_bal_"):
+            plan_id = int(data.split("_")[2])
+            plan = db.get_plan(plan_id)
+            user_data = db.get_user(user_id)
+            
+            # Recalculate price for security
+            price = float(plan['price'])
+            is_reseller, discount_perc = db.is_active_reseller(user_id)
+            if is_reseller:
+                price = price * (1 - (discount_perc / 100))
+            
+            if user_data.get("balance", 0) < price:
+                await query.answer("Insufficient balance!", show_alert=True)
+                return
+            
+            await query.answer("Processing payment…", show_alert=False)
+            
+            # Deduct balance
+            db.update_balance(user_id, -int(price))
+            
+            # Process automated key delivery
+            success, msg, delivery_data = db.purchase_key_automated(user_id, plan_id)
+            
+            if success:
+                # Update total spent
+                db.db.users.update_one({"_id": user_id}, {"$inc": {"total_spent": int(price)}})
+                
+                text = (
+                    f"<blockquote>{ce('success')} <b>PAYMENT SUCCESSFUL!</b></blockquote>\n\n"
+                    f"₹{price/100:.2f} has been deducted from your wallet.\n\n"
+                    f"<b>{ce('game')} Product:</b> {delivery_data['product']}\n"
+                    f"<b>{ce('time')} Duration:</b> {delivery_data['duration']}\n"
+                    f"<b>{ce('key')} Your Key:</b> <code>{delivery_data['key']}</code>\n"
+                    f"<b>{ce('calendar')} Expiry:</b> {delivery_data['expiry'][:16].replace('T', ' ')}\n\n"
+                    f"<i>{ce('rocket')} Thank you for choosing Hack Store!</i>"
+                )
+                await safe_edit_text(update, context, text, main_menu_kb())
+                
+                # Notify Admins
+                for admin in ADMIN_IDS:
+                    try:
+                        await context.bot.send_message(
+                            admin,
+                            f"<blockquote><b>{ce('money')} NEW WALLET PURCHASE</b></blockquote>\n"
+                            f"User: <code>{user_id}</code>\n"
+                            f"Product: {delivery_data['product']} ({delivery_data['duration']})\n"
+                            f"Amount: ₹{price/100:.2f}",
+                            parse_mode=ParseMode.HTML
+                        )
+                    except: pass
+            else:
+                # Refund balance if key delivery fails
+                db.update_balance(user_id, int(price))
+                await safe_edit_text(
+                    update, context,
+                    f"<blockquote>{ce('fail')} <b>PURCHASE FAILED</b></blockquote>\n\n"
+                    f"Error: {msg}\nYour balance has been refunded. Please contact support.",
+                    main_menu_kb()
+                )
+            return
 
         elif data == "user_contact":
             await query.answer()
@@ -2063,6 +2150,67 @@ async def receive_user_promo(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
+async def receive_add_fund_amt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amt = float(update.message.text.strip())
+        if amt < 1: raise ValueError
+    except:
+        await update.message.reply_text("Please enter a valid amount (minimum ₹1).", reply_markup=cancel_kb())
+        return WAIT_FOR_ADD_FUND_AMT
+
+    user_id = update.effective_user.id
+    svc_url = db.get_setting("payment_svc_url", "http://localhost:8000")
+    svc_token = db.get_setting("payment_svc_token", "")
+    admin_upi = db.get_setting("admin_upi_id")
+
+    if not svc_token or not admin_upi:
+        await update.message.reply_text("Payment service not configured by admin.", reply_markup=main_menu_kb())
+        return ConversationHandler.END
+
+    # Generate a special order ID for funds
+    order_id = f"FUND-{user_id}-{uuid.uuid4().hex[:6].upper()}"
+    # Store fund request
+    db.create_fund_request_with_order(user_id, order_id, None, amt * 100) # Store in paise
+
+    payee = db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
+    # Use awaitable svc_generate_qr
+    result = await svc_generate_qr(svc_url, svc_token, amt * 100, order_id, admin_upi, payee)
+
+    if result.get("status") == "success":
+        pay_data = result["data"]
+        qr_b64 = pay_data["qr_b64"]
+        qr_photo = io.BytesIO(base64.b64decode(qr_b64))
+        expires_at = pay_data["expires_at_ist"]
+
+        caption = (
+            f"<blockquote><b>{ce('money')} ADD FUNDS — ₹{amt:.2f}</b></blockquote>\n\n"
+            f"Scan the QR below to add money to your wallet.\n\n"
+            f"<i>{ce('warning')} QR expires at: <b>{expires_at}</b></i>\n"
+            f"<code>Order ID: {order_id}</code>"
+        )
+        buttons = [
+            [InlineKeyboardButton("I'VE PAID", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["success"][1], style="success")],
+            [InlineKeyboardButton("Cancel", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+        ]
+        msg = await context.bot.send_photo(
+            chat_id=user_id,
+            photo=qr_photo,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode=ParseMode.HTML,
+        )
+        # Schedule expiration job
+        context.job_queue.run_once(
+            qr_expiration_job,
+            when=300,
+            data={"chat_id": user_id, "message_id": msg.message_id, "order_id": order_id}
+        )
+    else:
+        await update.message.reply_text(f"Error: {result.get('message', 'QR generation failed')}", reply_markup=main_menu_kb())
+
+    return ConversationHandler.END
+
+
 # ── Admin conversations ────────────────────────────────────────────────────────
 async def prompt_ticket_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -2782,10 +2930,15 @@ def main():
         entry_points=[
             CallbackQueryHandler(prompt_ticket, pattern="^user_ticket$"),
             CallbackQueryHandler(prompt_user_promo, pattern="^user_promo$"),
+            CallbackQueryHandler(lambda u, c: (u.callback_query.answer(), u.callback_query.edit_message_text(
+                f"<blockquote><b>{ce('money')} ADD FUNDS</b></blockquote>\n\nEnter amount in ₹:",
+                reply_markup=cancel_kb(), parse_mode=ParseMode.HTML
+            ), WAIT_FOR_ADD_FUND_AMT)[2], pattern="^user_add_funds$"),
         ],
         states={
             WAIT_FOR_TICKET:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ticket)],
             WAIT_FOR_USER_PROMO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_user_promo)],
+            WAIT_FOR_ADD_FUND_AMT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_fund_amt)],
         },
         fallbacks=[CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
         per_message=False,
