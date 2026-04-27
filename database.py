@@ -194,6 +194,68 @@ class DatabaseManager:
         return [u["_id"] for u in self.db.users.find({"verified": 1}, {"_id": 1})]
 
     # ------------------------------------------------------------------
+    # Resellers
+    # ------------------------------------------------------------------
+    def set_reseller(self, user_id: int, days: int, discount: float):
+        """Enable reseller status for a user with expiry and discount."""
+        with self.lock:
+            expiry = (datetime.now() + timedelta(days=days)).isoformat()
+            self.db.users.update_one(
+                {"_id": user_id},
+                {"$set": {
+                    "is_reseller": True,
+                    "reseller_expiry": expiry,
+                    "reseller_discount": float(discount)
+                }}
+            )
+
+    def remove_reseller(self, user_id: int):
+        """Disable reseller status."""
+        with self.lock:
+            self.db.users.update_one(
+                {"_id": user_id},
+                {"$set": {"is_reseller": False}}
+            )
+
+    def get_resellers(self) -> List[dict]:
+        """Get all users who are marked as resellers."""
+        return list(self.db.users.find({"is_reseller": True}))
+
+    def is_active_reseller(self, user_id: int) -> Tuple[bool, float]:
+        """Check if user is an active reseller and return their discount."""
+        user = self.db.users.find_one({"_id": user_id})
+        if not user or not user.get("is_reseller"):
+            return False, 0.0
+
+        expiry_str = user.get("reseller_expiry")
+        if not expiry_str:
+            return False, 0.0
+
+        try:
+            expiry = datetime.fromisoformat(expiry_str)
+            if datetime.now() < expiry:
+                return True, float(user.get("reseller_discount", 0.0))
+        except Exception:
+            pass
+
+        # If expired, we could automatically turn it off here
+        return False, 0.0
+
+    def find_user_by_id_or_username(self, query: str) -> Optional[dict]:
+        """Find a user by numeric ID or @username."""
+        if not query: return None
+        
+        # Try numeric ID
+        if query.isdigit():
+            user = self.db.users.find_one({"_id": int(query)})
+            if user: return user
+            
+        # Try username
+        clean_uname = query.replace("@", "").strip()
+        user = self.db.users.find_one({"username": {"$regex": f"^{clean_uname}$", "$options": "i"}})
+        return user
+
+    # ------------------------------------------------------------------
     # Promo codes
     # ------------------------------------------------------------------
     def create_promo(self, code: str, reward_paise: int, max_uses: int) -> bool:

@@ -1894,7 +1894,7 @@ async def receive_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"From: <code>{user_id}</code>\n\n<i>{msg}</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                    f"{ce_button('chat')} Reply", callback_data=f"adm_tkt_{t_id}"
+                    "Reply", callback_data=f"adm_tkt_{t_id}", icon_custom_emoji_id=EMOJIS["chat"][1], style="success"
                 )]]),
             )
         except Exception:
@@ -2041,13 +2041,13 @@ async def prompt_edit_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<i>Choose a preset or type custom!</i>"
     )
     buttons = [
-        [InlineKeyboardButton(f"{ce_button('shield')} Safe / Main ID", callback_data="edit_preset_1")],
-        [InlineKeyboardButton(f"{ce_button('fire')} Brutal / Root", callback_data="edit_preset_2")],
-        [InlineKeyboardButton(f"{ce_button('apple')} iOS / eSign", callback_data="edit_preset_3")],
-        [InlineKeyboardButton(f"{ce_button('name_icon')} 8 Level ID", callback_data="edit_preset_4")],
-        [InlineKeyboardButton(f"{ce_button('mobile')} Drip Client (Non Root)", callback_data="edit_preset_5")],
-        [InlineKeyboardButton(f"{ce_button('pencil')} Type Custom", callback_data="edit_custom")],
-        [InlineKeyboardButton(f"{ce_button('fail')} Cancel", callback_data="cancel_conv")],
+        [InlineKeyboardButton("Safe / Main ID", callback_data="edit_preset_1", icon_custom_emoji_id=EMOJIS["shield"][1], style="primary")],
+        [InlineKeyboardButton("Brutal / Root", callback_data="edit_preset_2", icon_custom_emoji_id=EMOJIS["fire"][1], style="primary")],
+        [InlineKeyboardButton("iOS / eSign", callback_data="edit_preset_3", icon_custom_emoji_id=EMOJIS["apple"][1], style="primary")],
+        [InlineKeyboardButton("8 Level ID", callback_data="edit_preset_4", icon_custom_emoji_id=EMOJIS["name_icon"][1], style="primary")],
+        [InlineKeyboardButton("Drip Client (Non Root)", callback_data="edit_preset_5", icon_custom_emoji_id=EMOJIS["mobile"][1], style="primary")],
+        [InlineKeyboardButton("Type Custom", callback_data="edit_custom", icon_custom_emoji_id=EMOJIS["pencil"][1], style="primary")],
+        [InlineKeyboardButton("Cancel", callback_data="cancel_conv", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")],
     ]
     await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
     return WAIT_FOR_EDIT_PROD_DESC
@@ -2062,11 +2062,11 @@ async def receive_edit_prod_desc(update: Update, context: ContextTypes.DEFAULT_T
 
     def _prod_buttons(pid):
         return [
-            [InlineKeyboardButton(f"{ce_button('pencil')} Edit Description", callback_data=f"adm_edit_desc_{pid}")],
-            [InlineKeyboardButton(f"{ce_button('loop')} Toggle Status", callback_data=f"adm_ptog_{pid}")],
-            [InlineKeyboardButton(f"{ce_button('bag')} Manage Plans", callback_data=f"adm_plans_{pid}")],
-            [InlineKeyboardButton(f"{ce_button('fail')} Delete Product", callback_data=f"adm_delprod_{pid}")],
-            [InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_products")],
+            [InlineKeyboardButton("Edit Description", callback_data=f"adm_edit_desc_{pid}", icon_custom_emoji_id=EMOJIS["pencil"][1], style="primary")],
+            [InlineKeyboardButton("Toggle Status", callback_data=f"adm_ptog_{pid}", icon_custom_emoji_id=EMOJIS["loop"][1], style="primary")],
+            [InlineKeyboardButton("Manage Plans", callback_data=f"adm_plans_{pid}", icon_custom_emoji_id=EMOJIS["bag"][1], style="primary")],
+            [InlineKeyboardButton("Delete Product", callback_data=f"adm_delprod_{pid}", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")],
+            [InlineKeyboardButton("Back", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
         ]
 
     if update.callback_query:
@@ -2167,11 +2167,13 @@ async def receive_plan_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
         buttons = []
         for pl in plans:
             buttons.append([InlineKeyboardButton(
-                f"{ce_button('fail')} {pl['duration']} — ₹{pl['price']/100:.2f}",
+                f"{pl['duration']} — ₹{pl['price']/100:.2f}",
                 callback_data=f"adm_plan_del_{pl['id']}",
+                icon_custom_emoji_id=EMOJIS["fail"][1],
+                style="danger"
             )])
-        buttons.append([InlineKeyboardButton(f"{ce_button('plus')} Add New Plan", callback_data=f"adm_add_plan_{prod_id}")])
-        buttons.append([InlineKeyboardButton(f"{ce_button('back')} Back to Product", callback_data=f"adm_prod_{prod_id}")])
+        buttons.append([InlineKeyboardButton("Add New Plan", callback_data=f"adm_add_plan_{prod_id}", icon_custom_emoji_id=EMOJIS["plus"][1], style="success")])
+        buttons.append([InlineKeyboardButton("Back to Product", callback_data=f"adm_prod_{prod_id}", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
     except Exception:
         await update.message.reply_text("Invalid Price.", reply_markup=admin_menu_kb())
