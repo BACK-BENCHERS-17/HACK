@@ -496,11 +496,11 @@ def _welcome_text(bal: float) -> str:
 # ==============================================================================
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1]),
+        [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary"),
          InlineKeyboardButton("DOWNLOAD APK", callback_data="user_downloads", icon_custom_emoji_id=EMOJIS["disk"][1])],
         [InlineKeyboardButton("MY KEY", callback_data="user_my_keys_0", icon_custom_emoji_id=EMOJIS["key"][1]),
          InlineKeyboardButton("STOCK", callback_data="user_stock", icon_custom_emoji_id=EMOJIS["stock"][1])],
-        [InlineKeyboardButton("PROFILE", callback_data="user_profile", icon_custom_emoji_id=EMOJIS["user"][1]),
+        [InlineKeyboardButton("PROFILE", callback_data="user_profile", icon_custom_emoji_id=EMOJIS["user"][1], style="primary"),
          InlineKeyboardButton("HOW TO USE", callback_data="user_how_to", icon_custom_emoji_id=EMOJIS["mobile"][1])],
         [InlineKeyboardButton("SUPPORT", callback_data="user_contact", icon_custom_emoji_id=EMOJIS["contact"][1])],
     ])
@@ -511,12 +511,12 @@ def back_kb(callback_data: str) -> InlineKeyboardMarkup:
 
 
 def cancel_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Cancel Process", callback_data="cancel_conv", icon_custom_emoji_id=EMOJIS["fail"][1])]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Cancel Process", callback_data="cancel_conv", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")]])
 
 
 def admin_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Dashboard", callback_data="admin_stats", icon_custom_emoji_id=EMOJIS["stats"][1])],
+        [InlineKeyboardButton("Dashboard", callback_data="admin_stats", icon_custom_emoji_id=EMOJIS["stats"][1], style="primary")],
         [InlineKeyboardButton("Products", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["bag"][1]),
          InlineKeyboardButton("Keys", callback_data="admin_keys", icon_custom_emoji_id=EMOJIS["key"][1])],
         [InlineKeyboardButton("Users", callback_data="admin_users", icon_custom_emoji_id=EMOJIS["user"][1]),
@@ -525,9 +525,9 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("Tickets", callback_data="admin_tickets", icon_custom_emoji_id=EMOJIS["chat"][1])],
         [InlineKeyboardButton("Settings", callback_data="admin_settings", icon_custom_emoji_id=EMOJIS["settings"][1]),
          InlineKeyboardButton("Maintenance", callback_data="adm_maintenance", icon_custom_emoji_id=EMOJIS["tools"][1])],
-        [InlineKeyboardButton("UPI Session", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["session"][1]),
+        [InlineKeyboardButton("UPI Session", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["session"][1], style="primary"),
          InlineKeyboardButton("Backup DB", callback_data="adm_export_db", icon_custom_emoji_id=EMOJIS["disk"][1])],
-        [InlineKeyboardButton("Exit Admin", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+        [InlineKeyboardButton("Exit Admin", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
     ])
 
 
@@ -702,8 +702,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<i>Click below to generate your unique payment QR code (valid 5 min).</i>"
             )
             buttons = [
-                [InlineKeyboardButton("GENERATE PAYMENT QR", callback_data=f"gen_qr_{plan_id}", icon_custom_emoji_id=EMOJIS["pay"][1])],
-                [InlineKeyboardButton("CANCEL", callback_data=f"buy_prod_{plan['product_id']}", icon_custom_emoji_id=EMOJIS["fail"][1])],
+                [InlineKeyboardButton("GENERATE PAYMENT QR", callback_data=f"gen_qr_{plan_id}", icon_custom_emoji_id=EMOJIS["pay"][1], style="primary")],
+                [InlineKeyboardButton("CANCEL", callback_data=f"buy_prod_{plan['product_id']}", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -779,9 +779,9 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<code>Order ID: {order_id}</code>"
             )
             buttons = [
-                [InlineKeyboardButton("I'VE PAID", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["success"][1])],
-                [InlineKeyboardButton("Generate New QR", callback_data=f"gen_qr_{plan_id}", icon_custom_emoji_id=EMOJIS["refresh"][1])],
-                [InlineKeyboardButton("Cancel", callback_data=f"buy_plan_{plan_id}", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("I'VE PAID", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["success"][1], style="success")],
+                [InlineKeyboardButton("Generate New QR", callback_data=f"gen_qr_{plan_id}", icon_custom_emoji_id=EMOJIS["refresh"][1], style="primary")],
+                [InlineKeyboardButton("Cancel", callback_data=f"buy_plan_{plan_id}", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             try:
                 await query.message.delete()
@@ -987,8 +987,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 # Not paid yet
                 buttons = [
-                    [InlineKeyboardButton(f"{ce_button('refresh')} Try Again", callback_data=f"verify_pay_{order_id}")],
-                    [InlineKeyboardButton(f"{ce_button('back')} Back to Menu", callback_data="user_main")],
+                    [InlineKeyboardButton("Try Again", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["refresh"][1], style="primary")],
+                    [InlineKeyboardButton("Back to Menu", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
                 ]
                 await safe_edit_text(
                     update, context,
