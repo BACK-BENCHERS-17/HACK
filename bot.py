@@ -160,7 +160,9 @@ def get_line(n: int = 12) -> str:
     WAIT_FOR_SVC_MOBILE, WAIT_FOR_SVC_EMAIL, WAIT_FOR_SVC_OTP,
     # NEW: Microservice URL setting
     WAIT_FOR_SVC_URL,
-) = range(31)
+    # NEW: Reseller states
+    WAIT_FOR_RESELLER_USER, WAIT_FOR_RESELLER_DAYS, WAIT_FOR_RESELLER_DISCOUNT,
+) = range(35)
 
 
 # ==============================================================================
@@ -522,8 +524,9 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Users", callback_data="admin_users", icon_custom_emoji_id=EMOJIS["user"][1], style="primary"),
          InlineKeyboardButton("Pending Payments", callback_data="admin_pending_payments", icon_custom_emoji_id=EMOJIS["pending"][1], style="primary")],
         [InlineKeyboardButton("Broadcast", callback_data="admin_broadcast", icon_custom_emoji_id=EMOJIS["broadcast"][1], style="primary"),
-         InlineKeyboardButton("Tickets", callback_data="admin_tickets", icon_custom_emoji_id=EMOJIS["chat"][1], style="primary")],
-        [InlineKeyboardButton("Settings", callback_data="admin_settings", icon_custom_emoji_id=EMOJIS["settings"][1], style="primary"),
+         InlineKeyboardButton("Resellers", callback_data="admin_resellers", icon_custom_emoji_id=EMOJIS["shield"][1], style="primary")],
+        [InlineKeyboardButton("Tickets", callback_data="admin_tickets", icon_custom_emoji_id=EMOJIS["chat"][1], style="primary"),
+         InlineKeyboardButton("Settings", callback_data="admin_settings", icon_custom_emoji_id=EMOJIS["settings"][1], style="primary")],
          InlineKeyboardButton("Maintenance", callback_data="adm_maintenance", icon_custom_emoji_id=EMOJIS["tools"][1], style="primary")],
         [InlineKeyboardButton("UPI Session", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["session"][1], style="primary"),
          InlineKeyboardButton("Backup DB", callback_data="adm_export_db", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary")],
@@ -693,11 +696,23 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer()
             plan_id = int(data.split("_")[2])
             plan = db.get_plan(plan_id)
+            
+            # Check for reseller discount
+            original_price = plan['price']
+            final_price = original_price
+            discount_text = ""
+            is_reseller, discount_perc = db.is_active_reseller(user_id)
+            
+            if is_reseller:
+                final_price = original_price * (1 - (discount_perc / 100))
+                discount_text = f"<i>({ce('gift')} Reseller Discount: {discount_perc}% applied)</i>\n"
+
             text = (
                 f"<blockquote><b>{ce('cart')} PURCHASE CONFIRMATION</b></blockquote>\n\n"
                 f"<b>Product:</b> {plan['product_name']}\n"
                 f"<b>Duration:</b> {plan['duration']}\n"
-                f"<b>Price:</b> ₹{plan['price']/100:.2f}\n"
+                f"<b>Price:</b> ₹{final_price/100:.2f} <s>₹{original_price/100:.2f}</s>\n"
+                f"{discount_text}"
                 f"{get_line(12)}\n"
                 f"<i>Click below to generate your unique payment QR code (valid 5 min).</i>"
             )
@@ -736,9 +751,15 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 return
 
+            # Check for reseller discount
+            price = float(plan['price'])
+            is_reseller, discount_perc = db.is_active_reseller(user_id)
+            if is_reseller:
+                price = price * (1 - (discount_perc / 100))
+
             order_id = generate_order_id(plan_id, user_id)
             # Store fund_request in DB with PENDING status
-            db.create_fund_request_with_order(user_id, order_id, plan_id, plan['price'])
+            db.create_fund_request_with_order(user_id, order_id, plan_id, price)
 
             # Call microservice
             payee = db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
@@ -1337,6 +1358,42 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
+        # ── Resellers ─────────────────────────────────────────────────────────
+        elif data == "admin_resellers":
+            await query.answer()
+            resellers = db.get_resellers()
+            text = (
+                f"<blockquote><b>{ce('shield')} RESELLER MANAGEMENT</b></blockquote>\n\n"
+                f"Manage your bot resellers and their special discounts here.\n"
+                f"{get_line(12)}\n\n"
+            )
+            
+            if not resellers:
+                text += "<i>No resellers currently added.</i>"
+            else:
+                text += f"<b>Current Resellers ({len(resellers)}):</b>\n"
+                for r in resellers:
+                    expiry = r.get("reseller_expiry", "N/A")[:10]
+                    discount = r.get("reseller_discount", 0.0)
+                    uname = r.get("username") or r.get("first_name", "User")
+                    text += f"• <b>{uname}</b> (<code>{r['_id']}</code>)\n  ├ Discount: {discount}%\n  └ Exp: {expiry}\n"
+
+            buttons = [
+                [InlineKeyboardButton("Add/Edit Reseller", callback_data="adm_reseller_add", style="primary", icon_custom_emoji_id=EMOJIS["plus"][1])],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        elif data == "adm_reseller_add":
+            await query.answer()
+            await safe_edit_text(
+                update, context,
+                f"<blockquote><b>{ce('shield')} ADD/EDIT RESELLER</b></blockquote>\n\n"
+                f"Please send the <b>User ID</b> or <b>@Username</b> of the user you want to make a reseller.",
+                cancel_kb()
+            )
+            return WAIT_FOR_RESELLER_USER
+
         elif data == "adm_reverify_all":
             await query.answer("Re-verifying all pending payments…", show_alert=True)
             pending = db.get_pending_fund_requests()
@@ -1838,6 +1895,80 @@ async def receive_svc_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Please try again from Admin Panel → UPI Session.</blockquote>",
             reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
         )
+
+    return ConversationHandler.END
+
+
+# ── Reseller Input Handlers ───────────────────────────────────────────────────
+async def receive_reseller_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip()
+    user_doc = db.find_user_by_id_or_username(query)
+    
+    if not user_doc:
+        await update.message.reply_text(
+            f"<blockquote>{ce('fail')} <b>User not found!</b></blockquote>\n\n"
+            f"Please ensure the user has started the bot and check the ID/Username.",
+            reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
+        )
+        return WAIT_FOR_RESELLER_USER
+    
+    context.user_data["target_reseller_id"] = user_doc["_id"]
+    await update.message.reply_text(
+        f"<blockquote><b>{ce('shield')} USER FOUND: {user_doc.get('first_name', 'User')}</b></blockquote>\n\n"
+        f"How many <b>DAYS</b> should this user remain a reseller?\n"
+        f"<i>Enter 0 to remove reseller status.</i>",
+        reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
+    )
+    return WAIT_FOR_RESELLER_DAYS
+
+
+async def receive_reseller_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        days = int(update.message.text.strip())
+        if days < 0: raise ValueError
+    except:
+        await update.message.reply_text("Please enter a valid number of days.", reply_markup=cancel_kb())
+        return WAIT_FOR_RESELLER_DAYS
+
+    if days == 0:
+        uid = context.user_data.get("target_reseller_id")
+        db.remove_reseller(uid)
+        db.log_admin_action(update.effective_user.id, "Removed Reseller", f"UID: {uid}")
+        await update.message.reply_text(f"<blockquote>{ce('success')} Reseller status removed.</blockquote>", 
+                                       reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML)
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    context.user_data["reseller_days"] = days
+    await update.message.reply_text(
+        f"<blockquote><b>{ce('money')} DISCOUNT PERCENTAGE</b></blockquote>\n\n"
+        f"Enter the discount percentage for this reseller (e.g. <code>10</code> for 10% off).",
+        reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
+    )
+    return WAIT_FOR_RESELLER_DISCOUNT
+
+
+async def receive_reseller_discount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        discount = float(update.message.text.strip())
+        if not (0 <= discount <= 100): raise ValueError
+    except:
+        await update.message.reply_text("Please enter a valid discount (0-100).", reply_markup=cancel_kb())
+        return WAIT_FOR_RESELLER_DISCOUNT
+
+    uid = context.user_data.get("target_reseller_id")
+    days = context.user_data.get("reseller_days")
+    
+    db.set_reseller(uid, days, discount)
+    db.log_admin_action(update.effective_user.id, "Added/Updated Reseller", f"UID: {uid}, Days: {days}, Disc: {discount}%")
+    
+    await update.message.reply_text(
+        f"<blockquote>{ce('success')} <b>Reseller Setup Complete!</b></blockquote>\n\n"
+        f"User <code>{uid}</code> is now a reseller for {days} days with {discount}% discount.",
+        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
 
     context.user_data.clear()
     return ConversationHandler.END
@@ -2581,6 +2712,11 @@ def main():
             CallbackQueryHandler(prompt_ban, pattern="^adm_ban_usr$"),
             CallbackQueryHandler(prompt_unban, pattern="^adm_unban_usr$"),
             CallbackQueryHandler(prompt_manual_bal, pattern="^adm_add_bal$"),
+            # Resellers
+            CallbackQueryHandler(lambda u, c: (u.callback_query.answer(), u.callback_query.edit_message_text(
+                f"<blockquote><b>{ce('shield')} ADD/EDIT RESELLER</b></blockquote>\n\nSend User ID or Username:",
+                reply_markup=cancel_kb(), parse_mode=ParseMode.HTML
+            ), WAIT_FOR_RESELLER_USER)[2], pattern="^adm_reseller_add$"),
             # Products
             CallbackQueryHandler(prompt_add_prod, pattern="^adm_add_prod$"),
             CallbackQueryHandler(prompt_add_plan, pattern="^adm_add_plan_"),
@@ -2629,6 +2765,11 @@ def main():
             WAIT_FOR_TOS:             [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_tos)],
             WAIT_FOR_HOW_TO_TEXT:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_howto_text)],
             WAIT_FOR_HOW_TO_VIDEO:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_howto_vid)],
+            # Reseller
+            WAIT_FOR_RESELLER_USER:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reseller_user)],
+            WAIT_FOR_RESELLER_DAYS:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reseller_days)],
+            WAIT_FOR_RESELLER_DISCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reseller_discount)],
+
         },
         fallbacks=[CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
         per_message=False,
