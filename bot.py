@@ -1217,18 +1217,6 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 text += "\n"
             await safe_edit_text(update, context, text, back_kb("user_main"))
 
-        # ── Add Funds ──────────────────────────────────────────────────────────
-        elif data == "user_add_funds":
-            await query.answer()
-            await safe_edit_text(
-                update, context,
-                f"<blockquote><b>{ce('money')} ADD FUNDS TO WALLET</b></blockquote>\n\n"
-                f"Enter the amount in ₹ you wish to add to your wallet.\n"
-                f"<i>(Example: 100)</i>",
-                cancel_kb()
-            )
-            return WAIT_FOR_ADD_FUND_AMT
-
         # ── Pay via Balance ────────────────────────────────────────────────────
         elif data.startswith("pay_bal_"):
             plan_id = int(data.split("_")[2])
@@ -2102,6 +2090,19 @@ async def receive_set_svc_url(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ── User conversations ─────────────────────────────────────────────────────────
 @verification_required
+async def prompt_add_funds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await safe_edit_text(
+        update, context,
+        f"<blockquote><b>{ce('money')} ADD FUNDS TO WALLET</b></blockquote>\n\n"
+        f"Enter the amount in ₹ you wish to add to your wallet.\n"
+        f"<i>(Example: 100)</i>",
+        cancel_kb()
+    )
+    return WAIT_FOR_ADD_FUND_AMT
+
+
+@verification_required
 async def prompt_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -2955,10 +2956,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(prompt_ticket, pattern="^user_ticket$"),
             CallbackQueryHandler(prompt_user_promo, pattern="^user_promo$"),
-            CallbackQueryHandler(lambda u, c: (u.callback_query.answer(), u.callback_query.edit_message_text(
-                f"<blockquote><b>{ce('money')} ADD FUNDS</b></blockquote>\n\nEnter amount in ₹:",
-                reply_markup=cancel_kb(), parse_mode=ParseMode.HTML
-            ), WAIT_FOR_ADD_FUND_AMT)[2], pattern="^user_add_funds$"),
+            CallbackQueryHandler(prompt_add_funds, pattern="^user_add_funds$"),
         ],
         states={
             WAIT_FOR_TICKET:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ticket)],
