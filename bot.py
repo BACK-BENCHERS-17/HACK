@@ -1471,15 +1471,31 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
-        elif data == "adm_reseller_add":
+        # ── Resellers ─────────────────────────────────────────────────────────
+        elif data == "admin_resellers":
             await query.answer()
-            await safe_edit_text(
-                update, context,
-                f"<blockquote><b>{ce('shield')} ADD/EDIT RESELLER</b></blockquote>\n\n"
-                f"Please send the <b>User ID</b> or <b>@Username</b> of the user you want to make a reseller.",
-                cancel_kb()
+            resellers = db.get_resellers()
+            text = (
+                f"<blockquote><b>{ce('shield')} RESELLER MANAGEMENT</b></blockquote>\n\n"
+                f"Manage your bot resellers and their special discounts here.\n"
+                f"{get_line(12)}\n\n"
             )
-            return WAIT_FOR_RESELLER_USER
+            
+            if not resellers:
+                text += "<i>No resellers currently added.</i>"
+            else:
+                text += f"<b>Current Resellers ({len(resellers)}):</b>\n"
+                for r in resellers:
+                    expiry = r.get("reseller_expiry", "N/A")[:10]
+                    discount = r.get("reseller_discount", 0.0)
+                    uname = r.get("username") or r.get("first_name", "User")
+                    text += f"• <b>{uname}</b> (<code>{r['_id']}</code>)\n  ├ Discount: {discount}%\n  └ Exp: {expiry}\n"
+
+            buttons = [
+                [InlineKeyboardButton("Add/Edit Reseller", callback_data="adm_reseller_add", style="primary", icon_custom_emoji_id=EMOJIS["plus"][1])],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data == "adm_reverify_all":
             await query.answer("Re-verifying all pending payments…", show_alert=True)
@@ -2741,6 +2757,18 @@ async def prompt_manual_bal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_FOR_MANUAL_BAL_USER
 
 
+@verification_required
+async def prompt_reseller_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await safe_edit_text(
+        update, context,
+        f"<blockquote><b>{ce('shield')} ADD/EDIT RESELLER</b></blockquote>\n\n"
+        f"Please send the <b>User ID</b> or <b>@Username</b> of the user you want to make a reseller.",
+        cancel_kb()
+    )
+    return WAIT_FOR_RESELLER_USER
+
+
 async def receive_manual_bal_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = int(update.message.text.strip())
@@ -2861,10 +2889,7 @@ def main():
             CallbackQueryHandler(prompt_unban, pattern="^adm_unban_usr$"),
             CallbackQueryHandler(prompt_manual_bal, pattern="^adm_add_bal$"),
             # Resellers
-            CallbackQueryHandler(lambda u, c: (u.callback_query.answer(), u.callback_query.edit_message_text(
-                f"<blockquote><b>{ce('shield')} ADD/EDIT RESELLER</b></blockquote>\n\nSend User ID or Username:",
-                reply_markup=cancel_kb(), parse_mode=ParseMode.HTML
-            ), WAIT_FOR_RESELLER_USER)[2], pattern="^adm_reseller_add$"),
+            CallbackQueryHandler(prompt_reseller_add, pattern="^adm_reseller_add$"),
             # Products
             CallbackQueryHandler(prompt_add_prod, pattern="^adm_add_prod$"),
             CallbackQueryHandler(prompt_add_plan, pattern="^adm_add_plan_"),
