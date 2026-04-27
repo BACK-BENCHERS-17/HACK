@@ -348,7 +348,7 @@ async def qr_expiration_job(context: ContextTypes.DEFAULT_TYPE):
         ),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("Back to Store", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["back"][1])
+            InlineKeyboardButton("Back to Store", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")
         ]])
     )
 
@@ -497,17 +497,17 @@ def _welcome_text(bal: float) -> str:
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary"),
-         InlineKeyboardButton("DOWNLOAD APK", callback_data="user_downloads", icon_custom_emoji_id=EMOJIS["disk"][1])],
-        [InlineKeyboardButton("MY KEY", callback_data="user_my_keys_0", icon_custom_emoji_id=EMOJIS["key"][1]),
-         InlineKeyboardButton("STOCK", callback_data="user_stock", icon_custom_emoji_id=EMOJIS["stock"][1])],
+         InlineKeyboardButton("DOWNLOAD APK", callback_data="user_downloads", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary")],
+        [InlineKeyboardButton("MY KEY", callback_data="user_my_keys_0", icon_custom_emoji_id=EMOJIS["key"][1], style="primary"),
+         InlineKeyboardButton("STOCK", callback_data="user_stock", icon_custom_emoji_id=EMOJIS["stock"][1], style="primary")],
         [InlineKeyboardButton("PROFILE", callback_data="user_profile", icon_custom_emoji_id=EMOJIS["user"][1], style="primary"),
-         InlineKeyboardButton("HOW TO USE", callback_data="user_how_to", icon_custom_emoji_id=EMOJIS["mobile"][1])],
-        [InlineKeyboardButton("SUPPORT", callback_data="user_contact", icon_custom_emoji_id=EMOJIS["contact"][1])],
+         InlineKeyboardButton("HOW TO USE", callback_data="user_how_to", icon_custom_emoji_id=EMOJIS["mobile"][1], style="primary")],
+        [InlineKeyboardButton("SUPPORT", callback_data="user_contact", icon_custom_emoji_id=EMOJIS["contact"][1], style="primary")],
     ])
 
 
 def back_kb(callback_data: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=callback_data, icon_custom_emoji_id=EMOJIS["back"][1])]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=callback_data, icon_custom_emoji_id=EMOJIS["back"][1], style="danger")]])
 
 
 def cancel_kb() -> InlineKeyboardMarkup:
@@ -517,16 +517,16 @@ def cancel_kb() -> InlineKeyboardMarkup:
 def admin_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Dashboard", callback_data="admin_stats", icon_custom_emoji_id=EMOJIS["stats"][1], style="primary")],
-        [InlineKeyboardButton("Products", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["bag"][1]),
-         InlineKeyboardButton("Keys", callback_data="admin_keys", icon_custom_emoji_id=EMOJIS["key"][1])],
-        [InlineKeyboardButton("Users", callback_data="admin_users", icon_custom_emoji_id=EMOJIS["user"][1]),
-         InlineKeyboardButton("Pending Payments", callback_data="admin_pending_payments", icon_custom_emoji_id=EMOJIS["pending"][1])],
-        [InlineKeyboardButton("Broadcast", callback_data="admin_broadcast", icon_custom_emoji_id=EMOJIS["broadcast"][1]),
-         InlineKeyboardButton("Tickets", callback_data="admin_tickets", icon_custom_emoji_id=EMOJIS["chat"][1])],
-        [InlineKeyboardButton("Settings", callback_data="admin_settings", icon_custom_emoji_id=EMOJIS["settings"][1]),
-         InlineKeyboardButton("Maintenance", callback_data="adm_maintenance", icon_custom_emoji_id=EMOJIS["tools"][1])],
+        [InlineKeyboardButton("Products", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["bag"][1], style="primary"),
+         InlineKeyboardButton("Keys", callback_data="admin_keys", icon_custom_emoji_id=EMOJIS["key"][1], style="primary")],
+        [InlineKeyboardButton("Users", callback_data="admin_users", icon_custom_emoji_id=EMOJIS["user"][1], style="primary"),
+         InlineKeyboardButton("Pending Payments", callback_data="admin_pending_payments", icon_custom_emoji_id=EMOJIS["pending"][1], style="primary")],
+        [InlineKeyboardButton("Broadcast", callback_data="admin_broadcast", icon_custom_emoji_id=EMOJIS["broadcast"][1], style="primary"),
+         InlineKeyboardButton("Tickets", callback_data="admin_tickets", icon_custom_emoji_id=EMOJIS["chat"][1], style="primary")],
+        [InlineKeyboardButton("Settings", callback_data="admin_settings", icon_custom_emoji_id=EMOJIS["settings"][1], style="primary"),
+         InlineKeyboardButton("Maintenance", callback_data="adm_maintenance", icon_custom_emoji_id=EMOJIS["tools"][1], style="primary")],
         [InlineKeyboardButton("UPI Session", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["session"][1], style="primary"),
-         InlineKeyboardButton("Backup DB", callback_data="adm_export_db", icon_custom_emoji_id=EMOJIS["disk"][1])],
+         InlineKeyboardButton("Backup DB", callback_data="adm_export_db", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary")],
         [InlineKeyboardButton("Exit Admin", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
     ])
 
@@ -535,13 +535,13 @@ def pagination_kb(current_page: int, total_pages: int, prefix: str, back_cb: str
     buttons = []
     nav = []
     if current_page > 0:
-        nav.append(InlineKeyboardButton("Prev", callback_data=f"{prefix}_{current_page-1}", icon_custom_emoji_id=EMOJIS["left"][1]))
-    nav.append(InlineKeyboardButton(f"Page {current_page+1}/{total_pages}", callback_data="ignore", icon_custom_emoji_id=EMOJIS["memo"][1]))
+        nav.append(InlineKeyboardButton("Prev", callback_data=f"{prefix}_{current_page-1}", icon_custom_emoji_id=EMOJIS["left"][1], style="default"))
+    nav.append(InlineKeyboardButton(f"Page {current_page+1}/{total_pages}", callback_data="ignore", icon_custom_emoji_id=EMOJIS["memo"][1], style="default"))
     if current_page < total_pages - 1:
-        nav.append(InlineKeyboardButton("Next", callback_data=f"{prefix}_{current_page+1}", icon_custom_emoji_id=EMOJIS["right"][1]))
+        nav.append(InlineKeyboardButton("Next", callback_data=f"{prefix}_{current_page+1}", icon_custom_emoji_id=EMOJIS["right"][1], style="default"))
     if len(nav) > 1:
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton("Back", callback_data=back_cb, icon_custom_emoji_id=EMOJIS["back"][1])])
+    buttons.append([InlineKeyboardButton("Back", callback_data=back_cb, icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
     return buttons
 
 
@@ -650,10 +650,10 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<i>Browse our exclusive collection below:</i>\n{get_line(12)}"
             )
             buttons = [
-                [InlineKeyboardButton(p['name'], callback_data=f"buy_prod_{p['id']}", icon_custom_emoji_id=EMOJIS["game"][1])]
+                [InlineKeyboardButton(p['name'], callback_data=f"buy_prod_{p['id']}", icon_custom_emoji_id=EMOJIS["game"][1], style="primary")]
                 for p in products
             ]
-            buttons.append([InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1])])
+            buttons.append([InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
 
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -685,8 +685,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     btn_text = f"{pl['duration']} — SOLD OUT"
                     btn_cb = "ignore"
                     icon_id = EMOJIS["fail"][1]
-                buttons.append([InlineKeyboardButton(btn_text, callback_data=btn_cb, icon_custom_emoji_id=icon_id)])
-            buttons.append([InlineKeyboardButton("Back", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["back"][1])])
+                buttons.append([InlineKeyboardButton(btn_text, callback_data=btn_cb, icon_custom_emoji_id=icon_id, style="primary")])
+            buttons.append([InlineKeyboardButton("Back", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data.startswith("buy_plan_"):
@@ -1015,8 +1015,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"👇 <i>Tap the button below to access the Download Channel!</i>"
             )
             buttons = [
-                [InlineKeyboardButton(f"{ce_button('outbox')} ACCESS DOWNLOAD CHANNEL", url=channel_link)],
-                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("ACCESS DOWNLOAD CHANNEL", url=channel_link, style="primary", icon_custom_emoji_id=EMOJIS["outbox"][1])],
+                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons),
                                  link_preview_options=LinkPreviewOptions(is_disabled=True))
@@ -1027,8 +1027,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             vid = db.get_setting("how_to_video")
             buttons = []
             if vid and vid.startswith("http"):
-                buttons.append([InlineKeyboardButton(f"{ce_button('rocket')} Watch Tutorial Video", url=vid)])
-            buttons.append([InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1])])
+                buttons.append([InlineKeyboardButton("Watch Tutorial Video", url=vid, style="primary", icon_custom_emoji_id=EMOJIS["rocket"][1])])
+            buttons.append([InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons),
                                  link_preview_options=LinkPreviewOptions(is_disabled=True))
 
@@ -1067,8 +1067,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"👇 <i>Click the button below to share with your friends!</i>"
             )
             buttons = [
-                [InlineKeyboardButton(f"{ce_button('outbox')} SHARE & INVITE FRIENDS", url=share_url)],
-                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("SHARE & INVITE FRIENDS", url=share_url, style="primary", icon_custom_emoji_id=EMOJIS["outbox"][1])],
+                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1192,8 +1192,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<b>{ce('admin')} Admin:</b> {sup_user}"
             )
             buttons = [
-                [InlineKeyboardButton(f"{ce_button('ticket')} Open Support Ticket", callback_data="user_ticket")],
-                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Open Support Ticket", callback_data="user_ticket", style="primary", icon_custom_emoji_id=EMOJIS["ticket"][1])],
+                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1293,12 +1293,12 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             )
             buttons = []
             if is_active:
-                buttons.append([InlineKeyboardButton(f"{ce_button('refresh')} Re-Login", callback_data="adm_svc_login_start")])
-                buttons.append([InlineKeyboardButton(f"{ce_button('fail')} Logout", callback_data="adm_svc_logout")])
+                buttons.append([InlineKeyboardButton("Re-Login", callback_data="adm_svc_login_start", style="primary", icon_custom_emoji_id=EMOJIS["refresh"][1])])
+                buttons.append([InlineKeyboardButton("Logout", callback_data="adm_svc_logout", style="danger", icon_custom_emoji_id=EMOJIS["fail"][1])])
             else:
-                buttons.append([InlineKeyboardButton(f"{ce_button('success')} Login to Service", callback_data="adm_svc_login_start")])
-            buttons.append([InlineKeyboardButton(f"{ce_button('link')} Edit Service URL", callback_data="adm_set_svc_url")])
-            buttons.append([InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])])
+                buttons.append([InlineKeyboardButton("Login to Service", callback_data="adm_svc_login_start", style="success", icon_custom_emoji_id=EMOJIS["success"][1])])
+            buttons.append([InlineKeyboardButton("Edit Service URL", callback_data="adm_set_svc_url", style="primary", icon_custom_emoji_id=EMOJIS["link"][1])])
+            buttons.append([InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data == "adm_svc_logout":
@@ -1332,8 +1332,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                     f"  Date: {str(r.get('request_date', ''))[:16]}\n\n"
                 )
             buttons = [
-                [InlineKeyboardButton(f"{ce_button('refresh')} Re-verify All Pending", callback_data="adm_reverify_all")],
-                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Re-verify All Pending", callback_data="adm_reverify_all", style="primary", icon_custom_emoji_id=EMOJIS["refresh"][1])],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1457,8 +1457,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             )
             text = f"<blockquote><b>{ce('tools')} MAINTENANCE MODE</b></blockquote>\n\nCurrent Status: {status}"
             buttons = [
-                [InlineKeyboardButton(f"{ce_button('loop')} Toggle Mode", callback_data="adm_maintenance")],
-                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Toggle Mode", callback_data="adm_maintenance", style="danger", icon_custom_emoji_id=EMOJIS["loop"][1])],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1470,9 +1470,9 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 f"<blockquote><b>{ce('bag')} MANAGE PRODUCTS</b></blockquote>\n"
                 f"Select a product to edit or add a new one."
             )
-            buttons = [[InlineKeyboardButton(p['name'], callback_data=f"adm_prod_{p['id']}", icon_custom_emoji_id=EMOJIS["bag"][1])] for p in prods]
-            buttons.append([InlineKeyboardButton("Add New Product", callback_data="adm_add_prod", icon_custom_emoji_id=EMOJIS["plus"][1])])
-            buttons.append([InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])])
+            buttons = [[InlineKeyboardButton(p['name'], callback_data=f"adm_prod_{p['id']}", icon_custom_emoji_id=EMOJIS["bag"][1], style="primary")] for p in prods]
+            buttons.append([InlineKeyboardButton("Add New Product", callback_data="adm_add_prod", icon_custom_emoji_id=EMOJIS["plus"][1], style="success")])
+            buttons.append([InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data.startswith("adm_prod_"):
@@ -1486,11 +1486,11 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 f"{p.get('description', '')}"
             )
             buttons = [
-                [InlineKeyboardButton("Edit Description", callback_data=f"adm_edit_desc_{p_id}", icon_custom_emoji_id=EMOJIS["pencil"][1])],
-                [InlineKeyboardButton("Toggle Status", callback_data=f"adm_ptog_{p_id}", icon_custom_emoji_id=EMOJIS["loop"][1])],
-                [InlineKeyboardButton("Manage Plans", callback_data=f"adm_plans_{p_id}", icon_custom_emoji_id=EMOJIS["bag"][1])],
-                [InlineKeyboardButton("Delete Product", callback_data=f"adm_delprod_{p_id}", icon_custom_emoji_id=EMOJIS["fail"][1])],
-                [InlineKeyboardButton("Back", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Edit Description", callback_data=f"adm_edit_desc_{p_id}", icon_custom_emoji_id=EMOJIS["pencil"][1], style="primary")],
+                [InlineKeyboardButton("Toggle Status", callback_data=f"adm_ptog_{p_id}", icon_custom_emoji_id=EMOJIS["loop"][1], style="primary")],
+                [InlineKeyboardButton("Manage Plans", callback_data=f"adm_plans_{p_id}", icon_custom_emoji_id=EMOJIS["bag"][1], style="primary")],
+                [InlineKeyboardButton("Delete Product", callback_data=f"adm_delprod_{p_id}", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")],
+                [InlineKeyboardButton("Back", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1507,11 +1507,11 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 f"{p.get('description', '')}"
             )
             buttons = [
-                [InlineKeyboardButton("Edit Description", callback_data=f"adm_edit_desc_{p_id}", icon_custom_emoji_id=EMOJIS["pencil"][1])],
-                [InlineKeyboardButton("Toggle Status", callback_data=f"adm_ptog_{p_id}", icon_custom_emoji_id=EMOJIS["loop"][1])],
-                [InlineKeyboardButton("Manage Plans", callback_data=f"adm_plans_{p_id}", icon_custom_emoji_id=EMOJIS["bag"][1])],
-                [InlineKeyboardButton("Delete Product", callback_data=f"adm_delprod_{p_id}", icon_custom_emoji_id=EMOJIS["fail"][1])],
-                [InlineKeyboardButton("Back", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Edit Description", callback_data=f"adm_edit_desc_{p_id}", icon_custom_emoji_id=EMOJIS["pencil"][1], style="primary")],
+                [InlineKeyboardButton("Toggle Status", callback_data=f"adm_ptog_{p_id}", icon_custom_emoji_id=EMOJIS["loop"][1], style="primary")],
+                [InlineKeyboardButton("Manage Plans", callback_data=f"adm_plans_{p_id}", icon_custom_emoji_id=EMOJIS["bag"][1], style="primary")],
+                [InlineKeyboardButton("Delete Product", callback_data=f"adm_delprod_{p_id}", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")],
+                [InlineKeyboardButton("Back", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1522,8 +1522,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 f"This will also delete all its plans and keys. Cannot be undone.</blockquote>"
             )
             buttons = [
-                [InlineKeyboardButton("Yes, Delete", callback_data=f"adm_confirm_delprod_{p_id}", icon_custom_emoji_id=EMOJIS["fail"][1])],
-                [InlineKeyboardButton("Cancel", callback_data=f"adm_prod_{p_id}", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Yes, Delete", callback_data=f"adm_confirm_delprod_{p_id}", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")],
+                [InlineKeyboardButton("Cancel", callback_data=f"adm_prod_{p_id}", icon_custom_emoji_id=EMOJIS["back"][1], style="primary")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1549,11 +1549,13 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             buttons = []
             for pl in plans:
                 buttons.append([InlineKeyboardButton(
-                    f"{ce_button('fail')} {pl['duration']} — ₹{pl['price']/100:.2f}",
+                    f"{pl['duration']} — ₹{pl['price']/100:.2f}",
                     callback_data=f"adm_plan_del_{pl['id']}",
+                    icon_custom_emoji_id=EMOJIS["fail"][1],
+                    style="danger"
                 )])
-            buttons.append([InlineKeyboardButton(f"{ce_button('plus')} Add New Plan", callback_data=f"adm_add_plan_{p_id}")])
-            buttons.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data=f"adm_prod_{p_id}")])
+            buttons.append([InlineKeyboardButton("Add New Plan", callback_data=f"adm_add_plan_{p_id}", icon_custom_emoji_id=EMOJIS["plus"][1], style="success")])
+            buttons.append([InlineKeyboardButton("Back", callback_data=f"adm_prod_{p_id}", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data.startswith("adm_plan_del_"):
@@ -1565,8 +1567,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                     f"All keys under this plan will also be deleted.</blockquote>"
                 )
                 buttons = [
-                    [InlineKeyboardButton(f"{ce_button('fail')} Yes, Delete", callback_data=f"adm_confirm_plandell_{pl_id}")],
-                    [InlineKeyboardButton(f"{ce_button('back')} Cancel", callback_data=f"adm_plans_{plan['product_id']}")],
+                    [InlineKeyboardButton("Yes, Delete", callback_data=f"adm_confirm_plandell_{pl_id}", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")],
+                    [InlineKeyboardButton("Cancel", callback_data=f"adm_plans_{plan['product_id']}", icon_custom_emoji_id=EMOJIS["back"][1], style="primary")],
                 ]
                 await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1588,8 +1590,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer()
             prods = db.get_active_products()
             text = f"<blockquote><b>{ce('key')} MANAGE KEYS</b></blockquote>\nSelect a product to add bulk keys."
-            buttons = [[InlineKeyboardButton(p["name"], callback_data=f"adm_kprod_{p['id']}")] for p in prods]
-            buttons.append([InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])])
+            buttons = [[InlineKeyboardButton(p["name"], callback_data=f"adm_kprod_{p['id']}", style="primary")] for p in prods]
+            buttons.append([InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data.startswith("adm_kprod_"):
@@ -1597,8 +1599,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             p_id = int(data.split("_")[2])
             plans = db.get_plans(p_id)
             text = f"<blockquote><b>{ce('key')} SELECT PLAN TO ADD KEYS</b></blockquote>"
-            buttons = [[InlineKeyboardButton(pl["duration"], callback_data=f"adm_kplan_{pl['id']}")] for pl in plans]
-            buttons.append([InlineKeyboardButton(f"{ce_button('back')} Back", callback_data="admin_keys")])
+            buttons = [[InlineKeyboardButton(pl["duration"], callback_data=f"adm_kplan_{pl['id']}", style="primary")] for pl in plans]
+            buttons.append([InlineKeyboardButton("Back", callback_data="admin_keys", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         # ── Promos ─────────────────────────────────────────────────────────────
@@ -1609,8 +1611,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 f"Generate limited usage promo codes for your users!"
             )
             buttons = [
-                [InlineKeyboardButton(f"{ce_button('plus')} Create Promo Code", callback_data="adm_create_promo")],
-                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Create Promo Code", callback_data="adm_create_promo", style="success", icon_custom_emoji_id=EMOJIS["plus"][1])],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1622,10 +1624,10 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 f"Choose an action below:"
             )
             buttons = [
-                [InlineKeyboardButton(f"{ce_button('money')} Add Manual Balance", callback_data="adm_add_bal")],
-                [InlineKeyboardButton(f"{ce_button('fail')} Ban User", callback_data="adm_ban_usr"),
-                 InlineKeyboardButton(f"{ce_button('success')} Unban User", callback_data="adm_unban_usr")],
-                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Add Manual Balance", callback_data="adm_add_bal", style="primary", icon_custom_emoji_id=EMOJIS["money"][1])],
+                [InlineKeyboardButton("Ban User", callback_data="adm_ban_usr", style="danger", icon_custom_emoji_id=EMOJIS["fail"][1]),
+                 InlineKeyboardButton("Unban User", callback_data="adm_unban_usr", style="success", icon_custom_emoji_id=EMOJIS["success"][1])],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1652,12 +1654,12 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                     f"<i>Choose a setting to modify below:</i>"
                 )
                 buttons = [
-                    [InlineKeyboardButton(f"{ce_button('pencil')} Edit UPI ID", callback_data="adm_set_upi"),
-                     InlineKeyboardButton(f"{ce_button('pencil')} Edit Support User", callback_data="adm_set_sup")],
-                    [InlineKeyboardButton(f"{ce_button('pencil')} Edit QR Image", callback_data="adm_set_qr"),
-                     InlineKeyboardButton(f"{ce_button('pencil')} Edit Insult Msg", callback_data="adm_set_msg")],
-                    [InlineKeyboardButton(f"{ce_button('link')} Edit Download Channel", callback_data="adm_set_dl_link")],
-                    [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                    [InlineKeyboardButton("Edit UPI ID", callback_data="adm_set_upi", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1]),
+                     InlineKeyboardButton("Edit Support User", callback_data="adm_set_sup", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1])],
+                    [InlineKeyboardButton("Edit QR Image", callback_data="adm_set_qr", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1]),
+                     InlineKeyboardButton("Edit Insult Msg", callback_data="adm_set_msg", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1])],
+                    [InlineKeyboardButton("Edit Download Channel", callback_data="adm_set_dl_link", style="primary", icon_custom_emoji_id=EMOJIS["link"][1])],
+                    [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
                 ]
                 await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
             except Exception as e:
@@ -1675,11 +1677,11 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 f"Update the texts shown to users in the FAQ, TOS, and How To Use sections."
             )
             buttons = [
-                [InlineKeyboardButton(f"{ce_button('pencil')} Edit FAQ", callback_data="adm_edit_faq"),
-                 InlineKeyboardButton(f"{ce_button('pencil')} Edit TOS", callback_data="adm_edit_tos")],
-                [InlineKeyboardButton(f"{ce_button('pencil')} Edit How-To Text", callback_data="adm_edit_howto_text"),
-                 InlineKeyboardButton(f"{ce_button('link')} Edit How-To Video", callback_data="adm_edit_howto_vid")],
-                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Edit FAQ", callback_data="adm_edit_faq", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1]),
+                 InlineKeyboardButton("Edit TOS", callback_data="adm_edit_tos", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1])],
+                [InlineKeyboardButton("Edit How-To Text", callback_data="adm_edit_howto_text", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1]),
+                 InlineKeyboardButton("Edit How-To Video", callback_data="adm_edit_howto_vid", style="primary", icon_custom_emoji_id=EMOJIS["link"][1])],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1702,8 +1704,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 f"{get_line(12)}"
             )
             buttons = [
-                [InlineKeyboardButton(f"{ce_button('chat')} Reply & Close", callback_data=f"adm_tkt_{t['id']}")],
-                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1])],
+                [InlineKeyboardButton("Reply & Close", callback_data=f"adm_tkt_{t['id']}", style="success", icon_custom_emoji_id=EMOJIS["chat"][1])],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
@@ -1979,13 +1981,13 @@ async def receive_prod_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<i>Choose a beautiful preset description or type your own!</i>"
     )
     buttons = [
-        [InlineKeyboardButton(f"{ce_button('shield')} Safe / Main ID", callback_data="desc_preset_1")],
-        [InlineKeyboardButton(f"{ce_button('fire')} Brutal / Root", callback_data="desc_preset_2")],
-        [InlineKeyboardButton(f"{ce_button('apple')} iOS / eSign", callback_data="desc_preset_3")],
-        [InlineKeyboardButton(f"{ce_button('name_icon')} 8 Level ID", callback_data="desc_preset_4")],
-        [InlineKeyboardButton(f"{ce_button('mobile')} Drip Client (Non Root)", callback_data="desc_preset_5")],
-        [InlineKeyboardButton(f"{ce_button('pencil')} Type Custom Description", callback_data="desc_custom")],
-        [InlineKeyboardButton(f"{ce_button('fail')} Cancel", callback_data="cancel_conv")],
+        [InlineKeyboardButton("Safe / Main ID", callback_data="desc_preset_1", icon_custom_emoji_id=EMOJIS["shield"][1], style="primary")],
+        [InlineKeyboardButton("Brutal / Root", callback_data="desc_preset_2", icon_custom_emoji_id=EMOJIS["fire"][1], style="primary")],
+        [InlineKeyboardButton("iOS / eSign", callback_data="desc_preset_3", icon_custom_emoji_id=EMOJIS["apple"][1], style="primary")],
+        [InlineKeyboardButton("8 Level ID", callback_data="desc_preset_4", icon_custom_emoji_id=EMOJIS["name_icon"][1], style="primary")],
+        [InlineKeyboardButton("Drip Client (Non Root)", callback_data="desc_preset_5", icon_custom_emoji_id=EMOJIS["mobile"][1], style="primary")],
+        [InlineKeyboardButton("Type Custom Description", callback_data="desc_custom", icon_custom_emoji_id=EMOJIS["pencil"][1], style="primary")],
+        [InlineKeyboardButton("Cancel", callback_data="cancel_conv", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")],
     ]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
     return WAIT_FOR_NEW_PROD_DESC
