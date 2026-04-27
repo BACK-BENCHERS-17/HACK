@@ -164,7 +164,7 @@ def get_line(n: int = 12) -> str:
     WAIT_FOR_RESELLER_USER, WAIT_FOR_RESELLER_DAYS, WAIT_FOR_RESELLER_DISCOUNT,
     # NEW: Add fund state
     WAIT_FOR_ADD_FUND_AMT,
-) = range(36)
+) = range(35)
 
 
 # ==============================================================================
