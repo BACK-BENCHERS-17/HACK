@@ -2178,10 +2178,14 @@ async def receive_add_fund_amt(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     svc_url = db.get_setting("payment_svc_url", "http://localhost:8000")
     svc_token = db.get_setting("payment_svc_token", "")
-    admin_upi = db.get_setting("admin_upi_id")
+    admin_upi = db.get_setting("upi_id", "")
 
     if not svc_token or not admin_upi:
-        await update.message.reply_text("Payment service not configured by admin.", reply_markup=main_menu_kb())
+        await update.message.reply_text(
+            f"<blockquote>{ce('fail')} <b>Payment service not configured by admin.</b>\n"
+            f"Please contact support or try again later.</blockquote>", 
+            reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML
+        )
         return ConversationHandler.END
 
     # Generate a special order ID for funds
