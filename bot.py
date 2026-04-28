@@ -498,6 +498,26 @@ def _welcome_text(bal: float) -> str:
 # ==============================================================================
 # 7. KEYBOARDS
 # ==============================================================================
+def _get_keypad_kb(current_val: str):
+    """Generate numeric keypad buttons for custom amount entry."""
+    kb = [
+        [InlineKeyboardButton("1", callback_data="kp_1", style="default"), 
+         InlineKeyboardButton("2", callback_data="kp_2", style="default"), 
+         InlineKeyboardButton("3", callback_data="kp_3", style="default")],
+        [InlineKeyboardButton("4", callback_data="kp_4", style="default"), 
+         InlineKeyboardButton("5", callback_data="kp_5", style="default"), 
+         InlineKeyboardButton("6", callback_data="kp_6", style="default")],
+        [InlineKeyboardButton("7", callback_data="kp_7", style="default"), 
+         InlineKeyboardButton("8", callback_data="kp_8", style="default"), 
+         InlineKeyboardButton("9", callback_data="kp_9", style="default")],
+        [InlineKeyboardButton(f"{ce_button('fail')} Clear", callback_data="kp_clear", style="danger"), 
+         InlineKeyboardButton("0", callback_data="kp_0", style="default"), 
+         InlineKeyboardButton(f"{ce_button('success')} Confirm", callback_data="kp_ok", style="success")],
+        [InlineKeyboardButton("Back", callback_data="user_add_funds", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")]
+    ]
+    return kb
+
+
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary"),
@@ -1216,6 +1236,54 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     text += f"  ├ <b>{pl['duration']}: {pl['count']} keys</b>\n"
                 text += "\n"
             await safe_edit_text(update, context, text, back_kb("user_main"))
+
+        elif data == "user_add_funds":
+            await prompt_add_funds(update, context)
+            return
+
+        elif data.startswith("add_f_"):
+            if data == "add_f_manual":
+                # Initialize keypad with 0
+                text = f"<blockquote><b>{ce('money')} ENTER CUSTOM AMOUNT</b></blockquote>\n\nAmount: <b>₹0</b>\n\n<i>Use the keypad below to enter amount.</i>"
+                buttons = _get_keypad_kb("0")
+                await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+                return
+
+            # Predefined amount
+            amt = float(data.split("_")[2])
+            await query.answer(f"Preparing QR for ₹{amt}…")
+            await _process_add_fund(update, context, amt)
+            return
+
+        elif data.startswith("kp_"):
+            val = data.split("_")[1]
+            current = str(context.user_data.get("kp_val", "0"))
+            
+            if val == "clear":
+                new_val = "0"
+            elif val == "ok":
+                amt = float(current)
+                if amt < 1:
+                    await query.answer("Minimum amount is ₹1", show_alert=True)
+                    return
+                await query.answer(f"Confirming ₹{amt}…")
+                context.user_data["kp_val"] = "0" # reset for next time
+                await _process_add_fund(update, context, amt)
+                return
+            else:
+                if current == "0":
+                    new_val = val
+                else:
+                    if len(current) < 6: # Max 6 digits
+                        new_val = current + val
+                    else:
+                        new_val = current
+                        await query.answer("Max limit reached!")
+
+            context.user_data["kp_val"] = new_val
+            text = f"<blockquote><b>{ce('money')} ENTER CUSTOM AMOUNT</b></blockquote>\n\nAmount: <b>₹{new_val}</b>\n\n<i>Use the keypad below to enter amount.</i>"
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(_get_keypad_kb(new_val)))
+            return
 
         # ── Pay via Balance ────────────────────────────────────────────────────
         elif data.startswith("pay_bal_"):
@@ -2092,14 +2160,21 @@ async def receive_set_svc_url(update: Update, context: ContextTypes.DEFAULT_TYPE
 @verification_required
 async def prompt_add_funds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await safe_edit_text(
-        update, context,
+    text = (
         f"<blockquote><b>{ce('money')} ADD FUNDS TO WALLET</b></blockquote>\n\n"
-        f"Enter the amount in ₹ you wish to add to your wallet.\n"
-        f"<i>(Example: 100)</i>",
-        cancel_kb()
+        f"Choose a quick amount to add or type a custom one below.\n\n"
+        f"<i>{ce('rocket')} Predefined amounts are faster to process!</i>"
     )
-    return WAIT_FOR_ADD_FUND_AMT
+    buttons = [
+        [InlineKeyboardButton("₹100", callback_data="add_f_100", style="primary"),
+         InlineKeyboardButton("₹200", callback_data="add_f_200", style="primary")],
+        [InlineKeyboardButton("₹500", callback_data="add_f_500", style="primary"),
+         InlineKeyboardButton("₹1000", callback_data="add_f_1000", style="primary")],
+        [InlineKeyboardButton("Type Custom Amount", callback_data="add_f_manual", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1])],
+        [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+    ]
+    await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+    return ConversationHandler.END # We will handle buttons via callback query
 
 
 @verification_required
@@ -2167,26 +2242,22 @@ async def receive_user_promo(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-async def receive_add_fund_amt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        amt = float(update.message.text.strip())
-        if amt < 1: raise ValueError
-    except:
-        await update.message.reply_text("Please enter a valid amount (minimum ₹1).", reply_markup=cancel_kb())
-        return WAIT_FOR_ADD_FUND_AMT
-
+async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, amt: float):
     user_id = update.effective_user.id
     svc_url = db.get_setting("payment_svc_url", "http://localhost:8000")
     svc_token = db.get_setting("payment_svc_token", "")
     admin_upi = db.get_setting("upi_id", "")
 
     if not svc_token or not admin_upi:
-        await update.message.reply_text(
+        text = (
             f"<blockquote>{ce('fail')} <b>Payment service not configured by admin.</b>\n"
-            f"Please contact support or try again later.</blockquote>", 
-            reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML
+            f"Please contact support or try again later.</blockquote>"
         )
-        return ConversationHandler.END
+        if update.callback_query:
+            await safe_edit_text(update, context, text, main_menu_kb())
+        else:
+            await update.message.reply_text(text, reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
+        return
 
     # Generate a special order ID for funds
     order_id = f"FUND-{user_id}-{uuid.uuid4().hex[:6].upper()}"
@@ -2194,7 +2265,6 @@ async def receive_add_fund_amt(update: Update, context: ContextTypes.DEFAULT_TYP
     db.create_fund_request_with_order(user_id, order_id, None, amt * 100) # Store in paise
 
     payee = db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
-    # Use awaitable svc_generate_qr
     result = await svc_generate_qr(svc_url, svc_token, amt * 100, order_id, admin_upi, payee)
 
     if result.get("status") == "success":
@@ -2213,8 +2283,14 @@ async def receive_add_fund_amt(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("I'VE PAID", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["success"][1], style="success")],
             [InlineKeyboardButton("Cancel", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
         ]
+        
+        chat_id = update.effective_chat.id
+        if update.callback_query:
+            try: await update.callback_query.message.delete()
+            except: pass
+
         msg = await context.bot.send_photo(
-            chat_id=user_id,
+            chat_id=chat_id,
             photo=qr_photo,
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -2224,11 +2300,25 @@ async def receive_add_fund_amt(update: Update, context: ContextTypes.DEFAULT_TYP
         context.job_queue.run_once(
             qr_expiration_job,
             when=300,
-            data={"chat_id": user_id, "message_id": msg.message_id, "order_id": order_id}
+            data={"chat_id": chat_id, "message_id": msg.message_id, "order_id": order_id}
         )
     else:
-        await update.message.reply_text(f"Error: {result.get('message', 'QR generation failed')}", reply_markup=main_menu_kb())
+        err_msg = f"Error: {result.get('message', 'QR generation failed')}"
+        if update.callback_query:
+            await safe_edit_text(update, context, err_msg, main_menu_kb())
+        else:
+            await update.message.reply_text(err_msg, reply_markup=main_menu_kb())
 
+
+async def receive_add_fund_amt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amt = float(update.message.text.strip())
+        if amt < 1: raise ValueError
+    except:
+        await update.message.reply_text("Please enter a valid amount (minimum ₹1).", reply_markup=cancel_kb())
+        return WAIT_FOR_ADD_FUND_AMT
+
+    await _process_add_fund(update, context, amt)
     return ConversationHandler.END
 
 
@@ -2976,8 +3066,9 @@ def main():
     # ── Callback routers ──────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(
         handle_user_callbacks,
-        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_)",
+        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_|add_f_|kp_)",
     ))
+
     app.add_handler(CallbackQueryHandler(
         handle_admin_callbacks,
         pattern="^(admin_|adm_)",
