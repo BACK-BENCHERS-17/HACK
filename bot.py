@@ -782,18 +782,20 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 return
 
             # Check for reseller discount
-            price = float(plan['price'])
+            price_paise = float(plan['price'])
             is_reseller, discount_perc = db.is_active_reseller(user_id)
             if is_reseller:
-                price = price * (1 - (discount_perc / 100))
+                price_paise = price_paise * (1 - (discount_perc / 100))
+
+            price_inr = price_paise / 100
 
             order_id = generate_order_id(plan_id, user_id)
-            # Store fund_request in DB with PENDING status
-            db.create_fund_request_with_order(user_id, order_id, plan_id, price)
+            # Store fund_request in DB with PENDING status (Paise)
+            db.create_fund_request_with_order(user_id, order_id, plan_id, price_paise)
 
-            # Call microservice
+            # Call microservice (INR)
             payee = db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
-            result = await svc_generate_qr(svc_url, svc_token, price, order_id, admin_upi, payee)
+            result = await svc_generate_qr(svc_url, svc_token, price_inr, order_id, admin_upi, payee)
 
             if result.get("status") != "success":
                 err = result.get("message", "Unknown error")
@@ -821,9 +823,9 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 qr_photo = qr_url
 
             caption = (
-                f"<blockquote><b>{ce('card')} SCAN &amp; PAY ₹{price:.2f}</b></blockquote>\n\n"
+                f"<blockquote><b>{ce('card')} SCAN &amp; PAY ₹{price_inr:.2f}</b></blockquote>\n\n"
                 f"<b>{ce('1')} Scan the QR code below with any UPI app.</b>\n"
-                f"<b>{ce('2')} Pay exactly ₹{price:.2f}.</b>\n"
+                f"<b>{ce('2')} Pay exactly ₹{price_inr:.2f}.</b>\n"
                 f"<b>{ce('3')} After payment, click <u>I'VE PAID</u> below.</b>\n\n"
                 f"<i>{ce('warning')} QR expires at: <b>{expires_at}</b></i>\n"
                 f"<i>{ce('success')} Key will be delivered automatically after verification.</i>\n\n"
@@ -2262,11 +2264,12 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     # Generate a special order ID for funds
     order_id = f"FUND-{user_id}-{uuid.uuid4().hex[:6].upper()}"
-    # Store fund request
-    db.create_fund_request_with_order(user_id, order_id, None, amt * 100) # Store in paise
+    # Store fund request (Paise)
+    db.create_fund_request_with_order(user_id, order_id, None, amt * 100) 
 
     payee = db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
-    result = await svc_generate_qr(svc_url, svc_token, amt * 100, order_id, admin_upi, payee)
+    # Use awaitable svc_generate_qr (INR)
+    result = await svc_generate_qr(svc_url, svc_token, amt, order_id, admin_upi, payee)
 
     if result.get("status") == "success":
         pay_data = result["data"]
