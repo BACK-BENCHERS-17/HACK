@@ -6,6 +6,7 @@ Payment: Self-hosted UPI microservice (aiohttp).
 """
 
 import asyncio
+import base64
 import io
 import logging
 import math
@@ -3075,7 +3076,7 @@ def main():
     ))
 
     logger.info("🔥 Bot is starting (MongoDB + Render + Self-hosted Payment Service) 🔥")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
