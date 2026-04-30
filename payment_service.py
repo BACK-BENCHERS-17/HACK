@@ -262,6 +262,16 @@ PAYMENT_SENDERS = (
     "txnalert",
     "donotreply@cashfree",
     "noreply@razorpay",
+    "bharatpe",
+    "juspay",
+    "indusind",
+    "iob.in",
+    "pnb.co.in",
+    "idfcfirstbank",
+    "fampay.in",
+    "phonepe.com",
+    "upi.org",
+    "npci.org.in",
 )
 
 CREDIT_KEYWORDS = (
@@ -272,16 +282,22 @@ CREDIT_KEYWORDS = (
     "successfully credited",
     "credited to your",
     "has credited",
+    "has been credited",
+    "added to your account",
+    "you have received",
+    "money added",
+    "payment of",
+    "received a payment",
 )
 
 UTR_RE = re.compile(r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?)[:\s\-/]+([A-Za-z0-9]{8,})", re.I)
 TXN_RE = re.compile(r"\b(?:Txn(?:\s*Id)?|Transaction(?:\s*Id)?|Reference(?:\s*No)?|Ref\s*No)[:\s\-]+([A-Za-z0-9]{8,})", re.I)
-AMOUNT_RE = re.compile(r"(?:Rs\.?|INR|₹)\s*([0-9]+(?:[,.][0-9]{1,2})?)", re.I)
+AMOUNT_RE = re.compile(r"(?:Rs\.?|INR|₹|Amount|Amt)[:\s]*([0-9]+(?:[,.][0-9]{1,2})?)", re.I)
 # Sender name patterns: "from Anuj Patel", "received from Anuj Patel", "From: Anuj Patel"
 # Stops at: punctuation, newline, emoji, common follow-up words, or end-of-input.
 SENDER_RE = re.compile(
     r"(?:received\s+(?:money\s+)?from|^from|\bfrom)[:\s]+"
-    r"([A-Z][A-Za-z][A-Za-z .'\-]{1,60}?)"
+    r"([A-Z0-9][A-Za-z0-9][A-Za-z0-9 .'\-]{1,60}?)"
     r"(?:"
     r"\s*(?:\bvia\b|\bon\b|\bby\b|\busing\b|\bfor\b|\bthrough\b|UPI|@)"
     r"|\s*[•\-–|<\.,!₹]"
@@ -410,8 +426,10 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
         # one-day backward tolerance for orders placed near midnight.
         since_anchor = max(order_created_ts - 3600, 0)
         since_date = datetime.fromtimestamp(since_anchor).strftime("%d-%b-%Y")
+        log.info("Searching IMAP for order=%s amount=%.2f since=%s", order_id, amount, since_date)
         typ, data = m.search(None, f'(SINCE "{since_date}")')
         if typ != "OK" or not data or not data[0]:
+            log.info("No emails found since %s", since_date)
             return None
 
         # Anti-replay tolerance window: email must be no older than
@@ -419,6 +437,7 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
         min_email_ts = order_created_ts - 120
 
         ids = data[0].split()
+        log.info("Found %d potential emails in inbox since anchor.", len(ids))
         # Newest first, cap to last 80 messages for speed
         for msg_id in reversed(ids[-80:]):
             typ, msg_data = m.fetch(msg_id, "(RFC822)")
@@ -433,6 +452,8 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
             # Sender filter
             if not any(s in sender for s in PAYMENT_SENDERS):
                 continue
+            
+            log.info("Checking email from: %s, subject: %s", sender, subject)
 
             # Anti-replay: enforce that the email itself was received
             # AFTER the order was placed.
@@ -442,7 +463,9 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
                 email_ts = email_dt.timestamp() if email_dt else 0.0
             except Exception:
                 email_ts = 0.0
+            
             if email_ts and email_ts < min_email_ts:
+                log.info("Skipping old email: %s < %s", email_ts, min_email_ts)
                 continue
 
             body = _email_text(msg)
@@ -450,13 +473,18 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
 
             # Must be a credit / payment received email
             if not any(kw in haystack for kw in CREDIT_KEYWORDS):
+                log.info("Email does not contain credit keywords.")
                 continue
 
-            # Match either by order_id present in body OR by exact amount
-            order_match = order_id.lower() in haystack
+            # Match either by order_id present in body OR by exact amount.
+            # We also check for the last 8 characters of the order_id in case 
+            # the bank/app truncated the transaction note.
+            unique_suffix = order_id[-8:].lower()
+            order_match = (order_id.lower() in haystack) or (unique_suffix in haystack)
             amt_match = _amount_matches(subject + " " + body, amount)
 
             if not (order_match or amt_match):
+                log.info("No match for order_id=%s (suffix=%s) or amount=%.2f", order_id, unique_suffix, amount)
                 continue
 
             # Pull UTR / Txn Id / Sender name from email content

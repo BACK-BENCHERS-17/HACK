@@ -10,6 +10,7 @@ import base64
 import io
 import logging
 import math
+import os
 import re
 import time
 import traceback
@@ -193,12 +194,20 @@ DEFAULT_SETTINGS = {
     ),
     "how_to_video": "https://t.me/YOUR_VIDEO_LINK_HERE",
     # NEW: Payment microservice settings
-    "payment_svc_url": "http://localhost:8000",
+    "payment_svc_url": f"http://localhost:{os.environ.get('PORT') or os.environ.get('PAY_SVC_PORT') or '8000'}",
     "payment_svc_token": "",       # session token from /login
     "payment_svc_mobile": "",      # stored for re-login display
     "payment_svc_email": "",       # stored for re-login display
 }
 db.seed_default_settings(DEFAULT_SETTINGS)
+
+# Auto-fix for Render users who have http://localhost:8000 stored but the service is on a different port.
+_stored_url = db.get_setting("payment_svc_url")
+_env_port = os.environ.get('PORT') or os.environ.get('PAY_SVC_PORT')
+if _env_port and _env_port != "8000" and _stored_url == "http://localhost:8000":
+    _new_url = f"http://localhost:{_env_port}"
+    logger.info(f"Auto-updating payment_svc_url: {_stored_url} -> {_new_url} (PORT={_env_port})")
+    db.set_setting("payment_svc_url", _new_url)
 
 
 # ==============================================================================
@@ -866,7 +875,9 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             svc_url   = db.get_setting("payment_svc_url", "http://localhost:8000")
             svc_token = db.get_setting("payment_svc_token", "")
 
+            logger.info(f"User {user_id} clicking I'VE PAID for order={order_id}. Calling {svc_url}/verify_payment")
             result = await svc_verify_payment(svc_url, svc_token, order_id)
+            logger.info(f"Verification result for order={order_id}: {result.get('status')} - {result.get('message', 'N/A')}")
 
             if result.get("status") == "success":
                 pay_data = result["data"]
@@ -1577,7 +1588,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 order_id = req.get("order_id")
                 if not order_id:
                     continue
-                result = await svc_verify_payment(svc_url, svc_token, admin_id, order_id)
+                result = await svc_verify_payment(svc_url, svc_token, order_id)
                 if result.get("status") == "success":
                     pay_data = result["data"]
                     utr = pay_data.get("utr", "N/A")
