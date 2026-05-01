@@ -199,7 +199,15 @@ DEFAULT_SETTINGS = {
     "payment_svc_mobile": "",      # stored for re-login display
     "payment_svc_email": "",       # stored for re-login display
 }
-db.seed_default_settings(DEFAULT_SETTINGS)
+# Auto-fix for Render users who have http://localhost:8000 stored but the service is on a different port.
+async def post_init(application: Application):
+    await db.seed_default_settings(DEFAULT_SETTINGS)
+    _stored_url = await db.get_setting("payment_svc_url")
+    _env_port = os.environ.get('PORT') or os.environ.get('PAY_SVC_PORT')
+    if _env_port and _env_port != "8000" and _stored_url == "http://localhost:8000":
+        _new_url = f"http://localhost:{_env_port}"
+        logger.info(f"Auto-updating payment_svc_url: {_stored_url} -> {_new_url} (PORT={_env_port})")
+        await db.set_setting("payment_svc_url", _new_url)
 
 # Auto-fix for Render users who have http://localhost:8000 stored but the service is on a different port.
 _stored_url = db.get_setting("payment_svc_url")
@@ -344,7 +352,7 @@ async def qr_expiration_job(context: ContextTypes.DEFAULT_TYPE):
     order_id = job.data["order_id"]
 
     # Check if order was already PAID to avoid deleting valid success screens
-    req = db.get_fund_request_by_order(order_id)
+    req = await db.get_fund_request_by_order(order_id)
     if req and req.get("status") == "PAID":
         return
 
@@ -374,7 +382,7 @@ def verification_required(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id
 
-        is_maintenance = db.get_setting("maintenance_mode", "0")
+        is_maintenance = await db.get_setting("maintenance_mode", "0")
         if is_maintenance == "1" and user_id not in ADMIN_IDS:
             msg = (
                 f"<blockquote><b>{ce('warning')} MAINTENANCE MODE ACTIVE</b></blockquote>\n\n"
@@ -390,7 +398,7 @@ def verification_required(func):
         if user_id in ADMIN_IDS:
             return await func(update, context, *args, **kwargs)
 
-        user = db.get_user(user_id)
+        user = await db.get_user(user_id)
         if not user:
             await show_verification_prompt(update, context)
             return
@@ -429,9 +437,9 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contact = update.message.contact
     user_id = update.effective_user.id
 
-    db.add_user(user_id, update.effective_user.username, update.effective_user.first_name)
+    await db.add_user(user_id, update.effective_user.username, update.effective_user.first_name)
 
-    user = db.get_user(user_id)
+    user = await db.get_user(user_id)
     if user and user.get("verified", 0):
         await update.message.reply_text(
             f"<blockquote>{ce('success')} You are already verified.</blockquote>",
@@ -443,7 +451,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    db.verify_user(user_id)
+    await db.verify_user(user_id)
 
     try:
         phone_number = contact.phone_number
@@ -451,7 +459,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photos = await context.bot.get_user_profile_photos(user_id, limit=1)
         photo_id = (
             photos.photos[0][-1].file_id if photos.total_count > 0
-            else db.get_setting("default_pfp")
+            else await db.get_setting("default_pfp")
         )
         username = update.effective_user.username
         username_text = f"@{username}" if username else "N/A"
@@ -484,7 +492,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.HTML,
     )
 
-    user = db.get_user(user_id)
+    user = await db.get_user(user_id)
     bal = user.get("balance", 0) / 100
     welcome_text = _welcome_text(bal)
     await update.message.reply_text(welcome_text, reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
@@ -620,7 +628,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    is_new = db.add_user(user.id, user.username, user.first_name, referrer_id)
+    is_new = await db.add_user(user.id, user.username, user.first_name, referrer_id)
     if is_new and referrer_id:
         try:
             alert_text = (
@@ -632,7 +640,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    user_data = db.get_user(user.id)
+    user_data = await db.get_user(user.id)
     if user_data.get("is_banned", 0):
         await update.message.reply_text(
             f"<blockquote>{ce('fail')} <b>ACCOUNT BANNED</b>\nContact Admin.</blockquote>",
@@ -643,7 +651,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_verification_prompt(update, context)
         return
 
-    is_maintenance = db.get_setting("maintenance_mode", "0")
+    is_maintenance = await db.get_setting("maintenance_mode", "0")
     if is_maintenance == "1" and user.id not in ADMIN_IDS:
         await update.message.reply_text(
             f"<blockquote><b>{ce('warning')} MAINTENANCE MODE ACTIVE</b></blockquote>\n\n"
@@ -666,14 +674,14 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         # ── Main menu ──────────────────────────────────────────────────────────
         if data == "user_main":
             await query.answer()
-            user_data = db.get_user(user_id)
+            user_data = await db.get_user(user_id)
             bal = user_data.get("balance", 0) / 100
             await safe_edit_text(update, context, _welcome_text(bal), main_menu_kb())
 
         # ── Buy Hack ───────────────────────────────────────────────────────────
         elif data == "user_buy_hack":
             await query.answer()
-            products = db.get_active_products()
+            products = await db.get_active_products()
             if not products:
                 await safe_edit_text(
                     update, context,
@@ -696,8 +704,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         elif data.startswith("buy_prod_"):
             await query.answer()
             prod_id = int(data.split("_")[2])
-            prod = db.get_product(prod_id)
-            plans = db.get_plans(prod_id)
+            prod = await db.get_product(prod_id)
+            plans = await db.get_plans(prod_id)
             if not plans:
                 await safe_edit_text(
                     update, context,
@@ -712,7 +720,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             )
             buttons = []
             for pl in plans:
-                stock = db.get_available_key_count(pl['id'])
+                stock = await db.get_available_key_count(pl['id'])
                 if stock > 0:
                     btn_text = f"{pl['duration']} — ₹{pl['price']/100:.2f}"
                     btn_cb = f"buy_plan_{pl['id']}"
@@ -728,13 +736,13 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         elif data.startswith("buy_plan_"):
             await query.answer()
             plan_id = int(data.split("_")[2])
-            plan = db.get_plan(plan_id)
+            plan = await db.get_plan(plan_id)
             
             # Check for reseller discount
             original_price = plan['price']
             final_price = original_price
             discount_text = ""
-            is_reseller, discount_perc = db.is_active_reseller(user_id)
+            is_reseller, discount_perc = await db.is_active_reseller(user_id)
             
             if is_reseller:
                 final_price = original_price * (1 - (discount_perc / 100))
@@ -750,7 +758,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<i>Click below to generate your unique payment QR code (valid 5 min).</i>"
             )
             buttons = []
-            user_data = db.get_user(user_id)
+            user_data = await db.get_user(user_id)
             user_bal = user_data.get("balance", 0)
             
             if user_bal >= final_price:
@@ -765,12 +773,12 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         elif data.startswith("gen_qr_"):
             await query.answer("Generating QR…")
             plan_id = int(data.split("_")[2])
-            plan = db.get_plan(plan_id)
+            plan = await db.get_plan(plan_id)
             price = plan['price'] / 100
 
-            svc_url   = db.get_setting("payment_svc_url", "http://localhost:8000")
-            svc_token = db.get_setting("payment_svc_token", "")
-            admin_upi = db.get_setting("upi_id", "")
+            svc_url   = await db.get_setting("payment_svc_url", "http://localhost:8000")
+            svc_token = await db.get_setting("payment_svc_token", "")
+            admin_upi = await db.get_setting("upi_id", "")
 
             if not svc_token:
                 await safe_edit_text(
@@ -792,7 +800,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
             # Check for reseller discount
             price_paise = float(plan['price'])
-            is_reseller, discount_perc = db.is_active_reseller(user_id)
+            is_reseller, discount_perc = await db.is_active_reseller(user_id)
             if is_reseller:
                 price_paise = price_paise * (1 - (discount_perc / 100))
 
@@ -800,10 +808,10 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
             order_id = generate_order_id(plan_id, user_id)
             # Store fund_request in DB with PENDING status (Paise)
-            db.create_fund_request_with_order(user_id, order_id, plan_id, price_paise)
+            await db.create_fund_request_with_order(user_id, order_id, plan_id, price_paise)
 
             # Call microservice (INR)
-            payee = db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
+            payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
             result = await svc_generate_qr(svc_url, svc_token, price_inr, order_id, admin_upi, payee)
 
             if result.get("status") != "success":
@@ -872,8 +880,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         elif data.startswith("verify_pay_"):
             await query.answer("Verifying payment…", show_alert=False)
             order_id  = data[len("verify_pay_"):]
-            svc_url   = db.get_setting("payment_svc_url", "http://localhost:8000")
-            svc_token = db.get_setting("payment_svc_token", "")
+            svc_url   = await db.get_setting("payment_svc_url", "http://localhost:8000")
+            svc_token = await db.get_setting("payment_svc_token", "")
 
             logger.info(f"User {user_id} clicking I'VE PAID for order={order_id}. Calling {svc_url}/verify_payment")
             result = await svc_verify_payment(svc_url, svc_token, order_id)
@@ -889,15 +897,15 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 upi_id_paid = pay_data.get("upi_id", "")
 
                 # Get fund_request to find plan_id
-                req = db.get_fund_request_by_order(order_id)
+                req = await db.get_fund_request_by_order(order_id)
                 if not req:
                     await query.answer("Order not found. Contact support.", show_alert=True)
                     return
 
                 # Anti-replay: if this UTR is already attached to a different
                 # order in our own DB, refuse delivery and alert admins.
-                if utr and utr != "N/A" and db.is_utr_already_used(utr, except_order_id=order_id):
-                    db.update_fund_request_by_order(order_id, "REJECTED_DUPLICATE_UTR",
+                if utr and utr != "N/A" and await db.is_utr_already_used(utr, except_order_id=order_id):
+                    await db.update_fund_request_by_order(order_id, "REJECTED_DUPLICATE_UTR",
                                                    utr=utr, transaction_id=txn_id,
                                                    sender_name=sender_name,
                                                    payment_time=payment_time)
@@ -911,7 +919,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         back_kb("user_main"),
                     )
                     # Loud alert to admins about replay attempt
-                    user_obj = db.get_user(user_id)
+                    user_obj = await db.get_user(user_id)
                     uname = (user_obj.get("username") or "").lstrip("@")
                     fname = user_obj.get("first_name") or ""
                     for admin in ADMIN_IDS:
@@ -936,9 +944,9 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     return
 
                 # Deliver key automatically
-                success, msg, info = db.purchase_key_automated(user_id, req["plan_id"])
+                success, msg, info = await db.purchase_key_automated(user_id, req["plan_id"])
                 if success:
-                    db.update_fund_request_by_order(
+                    await db.update_fund_request_by_order(
                         order_id, "APPROVED",
                         utr=utr, transaction_id=txn_id,
                         sender_name=sender_name, payment_time=payment_time,
@@ -967,10 +975,10 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     )
 
                     # Detailed admin notification
-                    user_obj = db.get_user(user_id)
+                    user_obj = await db.get_user(user_id)
                     uname = (user_obj.get("username") or "").lstrip("@")
                     fname = user_obj.get("first_name") or ""
-                    plan_obj = db.get_plan(req["plan_id"]) or {}
+                    plan_obj = await db.get_plan(req["plan_id"]) or {}
                     expected_amount = plan_obj.get("price", paid_amount)
                     for admin in ADMIN_IDS:
                         try:
@@ -1000,7 +1008,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                             pass
                 else:
                     # Payment verified but key delivery failed (out of stock etc.)
-                    db.update_fund_request_by_order(
+                    await db.update_fund_request_by_order(
                         order_id, "PAID_NO_STOCK",
                         utr=utr, transaction_id=txn_id,
                         sender_name=sender_name, payment_time=payment_time,
@@ -1012,7 +1020,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         back_kb("user_main"),
                     )
                     # Urgent admin alert — money received, no key delivered
-                    user_obj = db.get_user(user_id)
+                    user_obj = await db.get_user(user_id)
                     uname = (user_obj.get("username") or "").lstrip("@")
                     fname = user_obj.get("first_name") or ""
                     for admin in ADMIN_IDS:
@@ -1065,7 +1073,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         # ── Downloads ─────────────────────────────────────────────────────────
         elif data == "user_downloads":
             await query.answer()
-            channel_link = db.get_setting("global_channel_link", "https://t.me/YourDownloadChannel")
+            channel_link = await db.get_setting("global_channel_link", "https://t.me/YourDownloadChannel")
             text = (
                 f"<blockquote><b>{ce('disk')} DOWNLOAD PREMIUM APK &amp; FILES {ce('disk')}</b></blockquote>\n\n"
                 f"<i>All our highly secured, premium, and updated files are securely hosted on our private channel!</i>\n"
@@ -1087,8 +1095,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "user_how_to":
             await query.answer()
-            text = db.get_setting("how_to_text")
-            vid = db.get_setting("how_to_video")
+            text = await db.get_setting("how_to_text")
+            vid = await db.get_setting("how_to_video")
             buttons = []
             if vid and vid.startswith("http"):
                 buttons.append([InlineKeyboardButton("Watch Tutorial Video", url=vid, style="primary", icon_custom_emoji_id=EMOJIS["rocket"][1])])
@@ -1098,7 +1106,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "user_balance":
             await query.answer()
-            user_data = db.get_user(user_id)
+            user_data = await db.get_user(user_id)
             bal = user_data.get("balance", 0) / 100
             text = (
                 f"<blockquote><b>{ce('card')} YOUR WALLET BALANCE</b></blockquote>\n\n"
@@ -1110,7 +1118,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "user_referral":
             await query.answer()
-            user_data = db.get_user(user_id)
+            user_data = await db.get_user(user_id)
             bot_info = await context.bot.get_me()
             ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
             share_msg = (
@@ -1138,7 +1146,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "user_leaderboard":
             await query.answer()
-            leaders = db.get_leaderboard()
+            leaders = await db.get_leaderboard()
             if not leaders:
                 await safe_edit_text(
                     update, context,
@@ -1158,8 +1166,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "user_faq":
             await query.answer()
-            faq = db.get_setting("faq_text")
-            tos = db.get_setting("tos_text")
+            faq = await db.get_setting("faq_text")
+            tos = await db.get_setting("tos_text")
             text = (
                 f"<blockquote><b>{ce('books')} FAQ &amp; TERMS OF SERVICE</b></blockquote>\n\n"
                 f"<b>🔹 FAQ:</b>\n<i>{faq}</i>\n\n"
@@ -1172,8 +1180,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         elif data == "user_profile":
             await query.answer()
             await context.bot.send_chat_action(chat_id=query.message.chat_id, action=ChatAction.UPLOAD_PHOTO)
-            user_data = db.get_user(user_id)
-            keys_count = db.get_user_keys_count(user_id)
+            user_data = await db.get_user(user_id)
+            keys_count = await db.get_user_keys_count(user_id)
             total_spent = user_data.get("total_spent", 0) / 100
             text = (
                 f"<blockquote><b>{ce('user')} USER PROFILE {ce('user')}</b></blockquote>\n\n"
@@ -1196,7 +1204,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 photos = await context.bot.get_user_profile_photos(user_id, limit=1)
                 photo_id = (
                     photos.photos[0][-1].file_id if photos.total_count > 0
-                    else db.get_setting("default_pfp")
+                    else await db.get_setting("default_pfp")
                 )
                 await query.message.delete()
                 await context.bot.send_photo(
@@ -1212,8 +1220,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             page = int(data.split("_")[3])
             limit = 5
             offset = page * limit
-            total_keys = db.get_user_keys_count(user_id)
-            keys = db.get_user_keys(user_id, offset, limit)
+            total_keys = await db.get_user_keys_count(user_id)
+            keys = await db.get_user_keys(user_id, offset, limit)
             if total_keys == 0:
                 await safe_edit_text(
                     update, context,
@@ -1235,7 +1243,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "user_stock":
             await query.answer()
-            summary = db.get_stock_summary()
+            summary = await db.get_stock_summary()
             if not summary:
                 await safe_edit_text(
                     update, context,
@@ -1302,12 +1310,12 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         # ── Pay via Balance ────────────────────────────────────────────────────
         elif data.startswith("pay_bal_"):
             plan_id = int(data.split("_")[2])
-            plan = db.get_plan(plan_id)
-            user_data = db.get_user(user_id)
+            plan = await db.get_plan(plan_id)
+            user_data = await db.get_user(user_id)
             
             # Recalculate price for security
             price = float(plan['price'])
-            is_reseller, discount_perc = db.is_active_reseller(user_id)
+            is_reseller, discount_perc = await db.is_active_reseller(user_id)
             if is_reseller:
                 price = price * (1 - (discount_perc / 100))
             
@@ -1318,14 +1326,14 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("Processing payment…", show_alert=False)
             
             # Deduct balance
-            db.update_balance(user_id, -int(price))
+            await db.update_balance(user_id, -int(price))
             
             # Process automated key delivery
-            success, msg, delivery_data = db.purchase_key_automated(user_id, plan_id)
+            success, msg, delivery_data = await db.purchase_key_automated(user_id, plan_id)
             
             if success:
                 # Update total spent
-                db.db.users.update_one({"_id": user_id}, {"$inc": {"total_spent": int(price)}})
+                await asyncio.to_thread(db.db.users.update_one, {"_id": user_id}, {"$inc": {"total_spent": int(price)}})
                 
                 text = (
                     f"<blockquote>{ce('success')} <b>PAYMENT SUCCESSFUL!</b></blockquote>\n\n"
@@ -1352,7 +1360,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     except: pass
             else:
                 # Refund balance if key delivery fails
-                db.update_balance(user_id, int(price))
+                await db.update_balance(user_id, int(price))
                 await safe_edit_text(
                     update, context,
                     f"<blockquote>{ce('fail')} <b>PURCHASE FAILED</b></blockquote>\n\n"
@@ -1363,7 +1371,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif data == "user_contact":
             await query.answer()
-            sup_user = db.get_setting("support_user")
+            sup_user = await db.get_setting("support_user")
             text = (
                 f"<blockquote><b>{ce('contact')} NEED HELP? WE'RE HERE!</b></blockquote>\n\n"
                 f"For direct support, questions, or issue resolution, contact our admin or open a ticket.\n\n"
@@ -1386,7 +1394,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        insult_raw = db.get_setting("unauth_msg")
+        insult_raw = await db.get_setting("unauth_msg")
         await update.message.reply_text(insult_raw, parse_mode=ParseMode.HTML)
         return
     await update.message.reply_text(
@@ -1416,7 +1424,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── Dashboard ─────────────────────────────────────────────────────────
         elif data == "admin_stats":
             await query.answer()
-            users, rev, sold, avail = db.get_global_stats()
+            users, rev, sold, avail = await db.get_global_stats()
             text = (
                 f"<blockquote><b>{ce('stats')} ENTERPRISE DASHBOARD &amp; STATS</b></blockquote>\n\n"
                 f"<b>{ce('user')} Total Verified Users:</b> {users}\n"
@@ -1431,10 +1439,10 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── UPI Session Management ─────────────────────────────────────────────
         elif data == "admin_svc_session":
             await query.answer()
-            token = db.get_setting("payment_svc_token", "")
-            svc_url = db.get_setting("payment_svc_url", "http://localhost:8000")
-            mobile  = db.get_setting("payment_svc_mobile", "Not set")
-            email   = db.get_setting("payment_svc_email", "Not set")
+            token = await db.get_setting("payment_svc_token", "")
+            svc_url = await db.get_setting("payment_svc_url", "http://localhost:8000")
+            mobile  = await db.get_setting("payment_svc_mobile", "Not set")
+            email   = await db.get_setting("payment_svc_email", "Not set")
             is_active = bool(token)
 
             # Probe the microservice for its auto-detected public base + health
@@ -1481,7 +1489,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 
         elif data == "adm_svc_logout":
             await query.answer()
-            db.set_setting("payment_svc_token", "")
+            await db.set_setting("payment_svc_token", "")
             await safe_edit_text(
                 update, context,
                 f"<blockquote>{ce('success')} <b>Logged out from payment service.</b></blockquote>",
@@ -1491,7 +1499,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── Pending Payments Panel ─────────────────────────────────────────────
         elif data == "admin_pending_payments":
             await query.answer()
-            pending = db.get_pending_fund_requests()
+            pending = await db.get_pending_fund_requests()
             if not pending:
                 await safe_edit_text(
                     update, context,
@@ -1518,7 +1526,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── Resellers ─────────────────────────────────────────────────────────
         elif data == "admin_resellers":
             await query.answer()
-            resellers = db.get_resellers()
+            resellers = await db.get_resellers()
             text = (
                 f"<blockquote><b>{ce('shield')} RESELLER MANAGEMENT</b></blockquote>\n\n"
                 f"Manage your bot resellers and their special discounts here.\n"
@@ -1544,7 +1552,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── Resellers ─────────────────────────────────────────────────────────
         elif data == "admin_resellers":
             await query.answer()
-            resellers = db.get_resellers()
+            resellers = await db.get_resellers()
             text = (
                 f"<blockquote><b>{ce('shield')} RESELLER MANAGEMENT</b></blockquote>\n\n"
                 f"Manage your bot resellers and their special discounts here.\n"
@@ -1569,7 +1577,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 
         elif data == "adm_reverify_all":
             await query.answer("Re-verifying all pending payments…", show_alert=True)
-            pending = db.get_pending_fund_requests()
+            pending = await db.get_pending_fund_requests()
             if not pending:
                 await safe_edit_text(
                     update, context,
@@ -1578,8 +1586,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 )
                 return
 
-            svc_url  = db.get_setting("payment_svc_url", "http://localhost:8000")
-            svc_token = db.get_setting("payment_svc_token", "")
+            svc_url  = await db.get_setting("payment_svc_url", "http://localhost:8000")
+            svc_token = await db.get_setting("payment_svc_token", "")
             admin_id  = ADMIN_IDS[0] if ADMIN_IDS else 0
 
             delivered, failed, not_paid = 0, 0, 0
@@ -1597,8 +1605,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                     payment_time = pay_data.get("payment_time_ist", "")
 
                     # Anti-replay check before delivery
-                    if utr and utr != "N/A" and db.is_utr_already_used(utr, except_order_id=order_id):
-                        db.update_fund_request_by_order(
+                    if utr and utr != "N/A" and await db.is_utr_already_used(utr, except_order_id=order_id):
+                        await db.update_fund_request_by_order(
                             order_id, "REJECTED_DUPLICATE_UTR",
                             utr=utr, transaction_id=txn_id,
                             sender_name=sender_name, payment_time=payment_time,
@@ -1607,9 +1615,9 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                         await asyncio.sleep(0.3)
                         continue
 
-                    success, msg, info = db.purchase_key_automated(req["user_id"], req["plan_id"])
+                    success, msg, info = await db.purchase_key_automated(req["user_id"], req["plan_id"])
                     if success:
-                        db.update_fund_request_by_order(
+                        await db.update_fund_request_by_order(
                             order_id, "APPROVED",
                             utr=utr, transaction_id=txn_id,
                             sender_name=sender_name, payment_time=payment_time,
@@ -1636,7 +1644,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                         except Exception:
                             pass
                     else:
-                        db.update_fund_request_by_order(
+                        await db.update_fund_request_by_order(
                             order_id, "PAID_NO_STOCK",
                             utr=utr, transaction_id=txn_id,
                             sender_name=sender_name, payment_time=payment_time,
@@ -1659,7 +1667,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         elif data == "adm_export_db":
             await query.answer("Preparing Database Export…")
             try:
-                data_bytes = db.export_database()
+                data_bytes = await db.export_database()
                 buf = io.BytesIO(data_bytes)
                 buf.name = f"hackstore_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 await context.bot.send_document(
@@ -1676,10 +1684,10 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── Maintenance ────────────────────────────────────────────────────────
         elif data == "adm_maintenance":
             await query.answer()
-            current = db.get_setting("maintenance_mode", "0")
+            current = await db.get_setting("maintenance_mode", "0")
             new_mode = "0" if current == "1" else "1"
-            db.set_setting("maintenance_mode", new_mode)
-            db.log_admin_action(user_id, "Toggled Maintenance", f"New Status: {new_mode}")
+            await db.set_setting("maintenance_mode", new_mode)
+            await db.log_admin_action(user_id, "Toggled Maintenance", f"New Status: {new_mode}")
             status = (
                 f"<b>{ce('fail')} ACTIVE (Users Blocked)</b>"
                 if new_mode == "1"
@@ -1695,7 +1703,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── Products ───────────────────────────────────────────────────────────
         elif data == "admin_products":
             await query.answer()
-            prods = db.get_all_products()
+            prods = await db.get_all_products()
             text = (
                 f"<blockquote><b>{ce('bag')} MANAGE PRODUCTS</b></blockquote>\n"
                 f"Select a product to edit or add a new one."
@@ -1708,7 +1716,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         elif data.startswith("adm_prod_"):
             await query.answer()
             p_id = int(data.split("_")[2])
-            p = db.get_product(p_id)
+            p = await db.get_product(p_id)
             text = (
                 f"<blockquote><b>{ce('edit')} EDIT PRODUCT</b></blockquote>\n\n"
                 f"<b>Name:</b> {p['name']}\n"
@@ -1726,10 +1734,10 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 
         elif data.startswith("adm_ptog_"):
             p_id = int(data.split("_")[2])
-            db.toggle_product(p_id)
-            db.log_admin_action(user_id, "Toggled Product", f"PID: {p_id}")
+            await db.toggle_product(p_id)
+            await db.log_admin_action(user_id, "Toggled Product", f"PID: {p_id}")
             await query.answer("Status toggled!")
-            p = db.get_product(p_id)
+            p = await db.get_product(p_id)
             text = (
                 f"<blockquote><b>{ce('edit')} EDIT PRODUCT</b></blockquote>\n\n"
                 f"<b>Name:</b> {p['name']}\n"
@@ -1759,8 +1767,8 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 
         elif data.startswith("adm_confirm_delprod_"):
             p_id = int(data.split("_")[3])
-            db.delete_product(p_id)
-            db.log_admin_action(user_id, "Deleted Product", f"PID: {p_id}")
+            await db.delete_product(p_id)
+            await db.log_admin_action(user_id, "Deleted Product", f"PID: {p_id}")
             await query.answer("Product deleted successfully!")
             await safe_edit_text(
                 update, context,
@@ -1771,7 +1779,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         elif data.startswith("adm_plans_"):
             await query.answer()
             p_id = int(data.split("_")[2])
-            plans = db.get_plans(p_id)
+            plans = await db.get_plans(p_id)
             text = (
                 f"<blockquote><b>📋 MANAGE PLANS</b></blockquote>\n"
                 f"<i>Click a plan to delete it.</i>\n{get_line(12)}"
@@ -1790,7 +1798,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 
         elif data.startswith("adm_plan_del_"):
             pl_id = int(data.split("_")[3])
-            plan = db.get_plan(pl_id)
+            plan = await db.get_plan(pl_id)
             if plan:
                 text = (
                     f"<blockquote><b>{ce('warning')} Delete plan '{plan['duration']}'?</b>\n\n"
@@ -1804,10 +1812,10 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 
         elif data.startswith("adm_confirm_plandell_"):
             pl_id = int(data.split("_")[3])
-            plan = db.get_plan(pl_id)
+            plan = await db.get_plan(pl_id)
             prod_id = plan.get("product_id") if plan else 0
-            db.delete_plan(pl_id)
-            db.log_admin_action(user_id, "Deleted Plan", f"PlanID: {pl_id}")
+            await db.delete_plan(pl_id)
+            await db.log_admin_action(user_id, "Deleted Plan", f"PlanID: {pl_id}")
             await query.answer("Plan deleted!")
             await safe_edit_text(
                 update, context,
@@ -1818,7 +1826,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── Keys ───────────────────────────────────────────────────────────────
         elif data == "admin_keys":
             await query.answer()
-            prods = db.get_active_products()
+            prods = await db.get_active_products()
             text = f"<blockquote><b>{ce('key')} MANAGE KEYS</b></blockquote>\nSelect a product to add bulk keys."
             buttons = [[InlineKeyboardButton(p["name"], callback_data=f"adm_kprod_{p['id']}", style="primary")] for p in prods]
             buttons.append([InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
@@ -1827,7 +1835,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         elif data.startswith("adm_kprod_"):
             await query.answer()
             p_id = int(data.split("_")[2])
-            plans = db.get_plans(p_id)
+            plans = await db.get_plans(p_id)
             text = f"<blockquote><b>{ce('key')} SELECT PLAN TO ADD KEYS</b></blockquote>"
             buttons = [[InlineKeyboardButton(pl["duration"], callback_data=f"adm_kplan_{pl['id']}", style="primary")] for pl in plans]
             buttons.append([InlineKeyboardButton("Back", callback_data="admin_keys", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
@@ -1865,12 +1873,12 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         elif data == "admin_settings":
             await query.answer()
             try:
-                qr_url = db.get_setting("qr_image")
+                qr_url = await db.get_setting("qr_image")
                 qr_status = "Set" if qr_url and qr_url != "None" else "Not Set"
-                upi = db.get_setting("upi_id")
-                support = db.get_setting("support_user")
-                dl_link = db.get_setting("global_channel_link", "Not Set")
-                insult_raw = db.get_setting("unauth_msg", "")
+                upi = await db.get_setting("upi_id")
+                support = await db.get_setting("support_user")
+                dl_link = await db.get_setting("global_channel_link", "Not Set")
+                insult_raw = await db.get_setting("unauth_msg", "")
                 insult_clean = re.sub(r"<[^>]+>", "", insult_raw)
                 insult_preview = insult_clean[:40] + "..." if len(insult_clean) > 40 else insult_clean
                 text = (
@@ -1918,7 +1926,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── Tickets ────────────────────────────────────────────────────────────
         elif data == "admin_tickets":
             await query.answer()
-            tkts = db.get_open_tickets()
+            tkts = await db.get_open_tickets()
             if not tkts:
                 await safe_edit_text(
                     update, context,
@@ -2033,7 +2041,7 @@ async def receive_svc_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mobile = context.user_data.get("svc_mobile", "")
     email  = context.user_data.get("svc_email", "")
-    svc_url = db.get_setting("payment_svc_url", "http://localhost:8000")
+    svc_url = await db.get_setting("payment_svc_url", "http://localhost:8000")
     admin_id = update.effective_user.id
 
     await update.message.reply_text(
@@ -2051,10 +2059,10 @@ async def receive_svc_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if result.get("status") == "ok":
         token = result.get("session_token", "")
-        db.set_setting("payment_svc_token", token)
-        db.set_setting("payment_svc_mobile", mobile)
-        db.set_setting("payment_svc_email", email)
-        db.log_admin_action(admin_id, "Payment Service Login", f"Mobile: {mobile}")
+        await db.set_setting("payment_svc_token", token)
+        await db.set_setting("payment_svc_mobile", mobile)
+        await db.set_setting("payment_svc_email", email)
+        await db.log_admin_action(admin_id, "Payment Service Login", f"Mobile: {mobile}")
 
         await update.message.reply_text(
             f"<blockquote>{ce('success')} <b>Payment service login successful!</b></blockquote>\n\n"
@@ -2075,7 +2083,7 @@ async def receive_svc_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Reseller Input Handlers ───────────────────────────────────────────────────
 async def receive_reseller_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
-    user_doc = db.find_user_by_id_or_username(query)
+    user_doc = await db.find_user_by_id_or_username(query)
     
     if not user_doc:
         await update.message.reply_text(
@@ -2105,8 +2113,8 @@ async def receive_reseller_days(update: Update, context: ContextTypes.DEFAULT_TY
 
     if days == 0:
         uid = context.user_data.get("target_reseller_id")
-        db.remove_reseller(uid)
-        db.log_admin_action(update.effective_user.id, "Removed Reseller", f"UID: {uid}")
+        await db.remove_reseller(uid)
+        await db.log_admin_action(update.effective_user.id, "Removed Reseller", f"UID: {uid}")
         await update.message.reply_text(f"<blockquote>{ce('success')} Reseller status removed.</blockquote>", 
                                        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML)
         context.user_data.clear()
@@ -2132,8 +2140,8 @@ async def receive_reseller_discount(update: Update, context: ContextTypes.DEFAUL
     uid = context.user_data.get("target_reseller_id")
     days = context.user_data.get("reseller_days")
     
-    db.set_reseller(uid, days, discount)
-    db.log_admin_action(update.effective_user.id, "Added/Updated Reseller", f"UID: {uid}, Days: {days}, Disc: {discount}%")
+    await db.set_reseller(uid, days, discount)
+    await db.log_admin_action(update.effective_user.id, "Added/Updated Reseller", f"UID: {uid}, Days: {days}, Disc: {discount}%")
     
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Reseller Setup Complete!</b></blockquote>\n\n"
@@ -2161,8 +2169,8 @@ async def prompt_set_svc_url(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def receive_set_svc_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip().rstrip("/")
-    db.set_setting("payment_svc_url", url)
-    db.log_admin_action(update.effective_user.id, "Changed Microservice URL", url)
+    await db.set_setting("payment_svc_url", url)
+    await db.log_admin_action(update.effective_user.id, "Changed Microservice URL", url)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Microservice URL Updated!</b>\n\n<code>{url}</code></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2205,7 +2213,7 @@ async def prompt_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text
     user_id = update.effective_user.id
-    t_id = db.create_ticket(user_id, msg)
+    t_id = await db.create_ticket(user_id, msg)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} Ticket #{t_id} created successfully!</blockquote>",
         reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2241,7 +2249,7 @@ async def prompt_user_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_user_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = update.message.text.strip().upper()
     user_id = update.effective_user.id
-    success, msg, amount = db.redeem_promo(user_id, code)
+    success, msg, amount = await db.redeem_promo(user_id, code)
     if success:
         await update.message.reply_text(
             f"<blockquote>{ce('success')} <b>PROMO CODE REDEEMED!</b></blockquote>\n\n"
@@ -2258,9 +2266,9 @@ async def receive_user_promo(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, amt: float):
     user_id = update.effective_user.id
-    svc_url = db.get_setting("payment_svc_url", "http://localhost:8000")
-    svc_token = db.get_setting("payment_svc_token", "")
-    admin_upi = db.get_setting("upi_id", "")
+    svc_url = await db.get_setting("payment_svc_url", "http://localhost:8000")
+    svc_token = await db.get_setting("payment_svc_token", "")
+    admin_upi = await db.get_setting("upi_id", "")
 
     if not svc_token or not admin_upi:
         text = (
@@ -2276,9 +2284,9 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     # Generate a special order ID for funds
     order_id = f"FUND-{user_id}-{uuid.uuid4().hex[:6].upper()}"
     # Store fund request (Paise)
-    db.create_fund_request_with_order(user_id, order_id, None, amt * 100) 
+    await db.create_fund_request_with_order(user_id, order_id, None, amt * 100) 
 
-    payee = db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
+    payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
     # Use awaitable svc_generate_qr (INR)
     result = await svc_generate_qr(svc_url, svc_token, amt, order_id, admin_upi, payee)
 
@@ -2353,7 +2361,7 @@ async def prompt_ticket_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def receive_ticket_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = update.message.text
     t_id = context.user_data["reply_tkt_id"]
-    u_id = db.reply_ticket(t_id, reply)
+    u_id = await db.reply_ticket(t_id, reply)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Reply sent and ticket closed.</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2412,8 +2420,8 @@ async def receive_prod_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         preset_id = cb_data.split("_")[2]
         desc = get_preset_desc(preset_id)
         name = context.user_data.get("new_prod_name")
-        db.add_product(name, desc)
-        db.log_admin_action(update.effective_user.id, "Added Product", f"Name: {name}")
+        await db.add_product(name, desc)
+        await db.log_admin_action(update.effective_user.id, "Added Product", f"Name: {name}")
         await safe_edit_text(
             update, context,
             f"<blockquote>{ce('success')} <b>Product '{name}' Added Successfully!</b></blockquote>",
@@ -2426,8 +2434,8 @@ async def receive_prod_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_custom_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc = f"<blockquote><b>{update.message.text.strip()}</b></blockquote>"
     name = context.user_data.get("new_prod_name")
-    db.add_product(name, desc)
-    db.log_admin_action(update.effective_user.id, "Added Product", f"Name: {name}")
+    await db.add_product(name, desc)
+    await db.log_admin_action(update.effective_user.id, "Added Product", f"Name: {name}")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Product '{name}' Added Successfully!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2487,9 +2495,9 @@ async def receive_edit_prod_desc(update: Update, context: ContextTypes.DEFAULT_T
         elif cb_data.startswith("edit_preset_"):
             preset_id = cb_data.split("_")[2]
             desc = get_preset_desc(preset_id)
-            db.update_product_description(prod_id, desc)
-            db.log_admin_action(update.effective_user.id, "Edited Product Description", f"PID: {prod_id}")
-            p = db.get_product(prod_id)
+            await db.update_product_description(prod_id, desc)
+            await db.log_admin_action(update.effective_user.id, "Edited Product Description", f"PID: {prod_id}")
+            p = await db.get_product(prod_id)
             text = (
                 f"<blockquote>{ce('success')} <b>Description Updated!</b></blockquote>\n\n"
                 f"<b>Name:</b> {p['name']}\n"
@@ -2501,9 +2509,9 @@ async def receive_edit_prod_desc(update: Update, context: ContextTypes.DEFAULT_T
             return ConversationHandler.END
     else:
         new_desc = f"<blockquote><b>{update.message.text}</b></blockquote>"
-        db.update_product_description(prod_id, new_desc)
-        db.log_admin_action(update.effective_user.id, "Edited Product Description", f"PID: {prod_id}")
-        p = db.get_product(prod_id)
+        await db.update_product_description(prod_id, new_desc)
+        await db.log_admin_action(update.effective_user.id, "Edited Product Description", f"PID: {prod_id}")
+        p = await db.get_product(prod_id)
         text = (
             f"<blockquote>{ce('success')} <b>Description Updated!</b></blockquote>\n\n"
             f"<b>Name:</b> {p['name']}\n"
@@ -2527,8 +2535,8 @@ async def prompt_set_dl_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def receive_set_dl_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.set_setting("global_channel_link", update.message.text.strip())
-    db.log_admin_action(update.effective_user.id, "Changed Download Link", "Setting Updated")
+    await db.set_setting("global_channel_link", update.message.text.strip())
+    await db.log_admin_action(update.effective_user.id, "Changed Download Link", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Download Channel Link Updated!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2561,9 +2569,9 @@ async def receive_plan_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         price = int(float(update.message.text.strip()) * 100)
         prod_id = context.user_data["add_plan_pid"]
-        db.add_plan(prod_id, context.user_data["add_plan_dur"], price)
-        db.log_admin_action(update.effective_user.id, "Added Plan", f"PID: {prod_id}")
-        plans = db.get_plans(prod_id)
+        await db.add_plan(prod_id, context.user_data["add_plan_dur"], price)
+        await db.log_admin_action(update.effective_user.id, "Added Plan", f"PID: {prod_id}")
+        plans = await db.get_plans(prod_id)
         text = (
             f"<blockquote>{ce('success')} <b>Plan Added Successfully!</b></blockquote>\n\n"
             f"<blockquote><b>📋 MANAGE PLANS</b></blockquote>\n"
@@ -2600,8 +2608,8 @@ async def prompt_add_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_add_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keys = [k.strip() for k in update.message.text.split("\n") if k.strip()]
-    count = db.add_keys(context.user_data["add_key_plan"], keys)
-    db.log_admin_action(update.effective_user.id, "Added Keys", f"Count: {count}")
+    count = await db.add_keys(context.user_data["add_key_plan"], keys)
+    await db.log_admin_action(update.effective_user.id, "Added Keys", f"Count: {count}")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Successfully added {count} unique keys!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2647,7 +2655,7 @@ async def receive_promo_uses(update: Update, context: ContextTypes.DEFAULT_TYPE)
         uses = int(update.message.text.strip())
         code = context.user_data["promo_code"]
         reward = context.user_data["promo_reward"]
-        if db.create_promo(code, reward, uses):
+        if await db.create_promo(code, reward, uses):
             await update.message.reply_text(
                 f"<blockquote>{ce('success')} <b>Promo Code <code>{code}</code> Created!</b></blockquote>",
                 reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2674,7 +2682,7 @@ async def prompt_edit_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receive_edit_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.set_setting("faq_text", update.message.text)
+    await db.set_setting("faq_text", update.message.text)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>FAQ Updated Successfully!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2693,7 +2701,7 @@ async def prompt_edit_tos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receive_edit_tos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.set_setting("tos_text", update.message.text)
+    await db.set_setting("tos_text", update.message.text)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>TOS Updated Successfully!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2712,7 +2720,7 @@ async def prompt_edit_howto_text(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def receive_howto_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.set_setting("how_to_text", update.message.text)
+    await db.set_setting("how_to_text", update.message.text)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>How To Use Text Updated Successfully!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2731,7 +2739,7 @@ async def prompt_edit_howto_vid(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def receive_howto_vid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.set_setting("how_to_video", update.message.text.strip())
+    await db.set_setting("how_to_video", update.message.text.strip())
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>How To Use Video Link Updated Successfully!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2752,7 +2760,7 @@ async def prompt_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text
-    user_ids = db.get_all_verified_user_ids()
+    user_ids = await db.get_all_verified_user_ids()
     sent, failed = 0, 0
     await update.message.reply_text("Broadcast started… (This may take a moment).")
     for uid in user_ids:
@@ -2762,7 +2770,7 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(0.05)
         except Exception:
             failed += 1
-    db.log_admin_action(update.effective_user.id, "Broadcast", f"Sent: {sent}, Failed: {failed}")
+    await db.log_admin_action(update.effective_user.id, "Broadcast", f"Sent: {sent}, Failed: {failed}")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Broadcast Finished.</b>\nSent: {sent}\nFailed: {failed}</blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2782,8 +2790,8 @@ async def prompt_set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receive_set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.set_setting("upi_id", update.message.text.strip())
-    db.log_admin_action(update.effective_user.id, "Changed UPI", "Setting Updated")
+    await db.set_setting("upi_id", update.message.text.strip())
+    await db.log_admin_action(update.effective_user.id, "Changed UPI", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>UPI ID Updated!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2805,8 +2813,8 @@ async def prompt_set_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_set_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file_id = photo.file_id
-    db.set_setting("qr_image", file_id)
-    db.log_admin_action(update.effective_user.id, "Changed QR Image", "Setting Updated")
+    await db.set_setting("qr_image", file_id)
+    await db.log_admin_action(update.effective_user.id, "Changed QR Image", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>QR Image Updated!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2826,8 +2834,8 @@ async def prompt_set_sup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receive_set_sup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.set_setting("support_user", update.message.text.strip())
-    db.log_admin_action(update.effective_user.id, "Changed Support User", "Setting Updated")
+    await db.set_setting("support_user", update.message.text.strip())
+    await db.log_admin_action(update.effective_user.id, "Changed Support User", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Support Username Updated!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2847,8 +2855,8 @@ async def prompt_set_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receive_set_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.set_setting("unauth_msg", update.message.text.strip())
-    db.log_admin_action(update.effective_user.id, "Changed Insult Msg", "Setting Updated")
+    await db.set_setting("unauth_msg", update.message.text.strip())
+    await db.log_admin_action(update.effective_user.id, "Changed Insult Msg", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Insult Message Updated!</b></blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2882,7 +2890,7 @@ async def prompt_reseller_add(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def receive_manual_bal_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = int(update.message.text.strip())
-        if not db.get_user(uid):
+        if not await db.get_user(uid):
             await update.message.reply_text("User not found in DB.", reply_markup=admin_menu_kb())
             return ConversationHandler.END
         context.user_data["man_bal_uid"] = uid
@@ -2901,8 +2909,8 @@ async def receive_manual_bal_amt(update: Update, context: ContextTypes.DEFAULT_T
         amt = float(update.message.text.strip())
         paise = int(amt * 100)
         uid = context.user_data["man_bal_uid"]
-        db.update_balance(uid, paise)
-        db.log_admin_action(update.effective_user.id, "Manual Balance Add", f"UID: {uid}, Amt: {amt}")
+        await db.update_balance(uid, paise)
+        await db.log_admin_action(update.effective_user.id, "Manual Balance Add", f"UID: {uid}, Amt: {amt}")
         await update.message.reply_text(
             f"<blockquote>{ce('success')} <b>Added ₹{amt} to User {uid}.</b></blockquote>",
             reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2935,8 +2943,8 @@ async def prompt_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = int(update.message.text)
-        db.ban_user(uid, 1)
-        db.log_admin_action(update.effective_user.id, "Banned User", f"UID: {uid}")
+        await db.ban_user(uid, 1)
+        await db.log_admin_action(update.effective_user.id, "Banned User", f"UID: {uid}")
         await update.message.reply_text(
             f"<blockquote>{ce('success')} <b>User <code>{uid}</code> is now BANNED.</b></blockquote>",
             reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
@@ -2960,8 +2968,8 @@ async def prompt_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = int(update.message.text)
-        db.ban_user(uid, 0)
-        db.log_admin_action(update.effective_user.id, "Unbanned User", f"UID: {uid}")
+        await db.ban_user(uid, 0)
+        await db.log_admin_action(update.effective_user.id, "Unbanned User", f"UID: {uid}")
         await update.message.reply_text(
             f"<blockquote>{ce('success')} <b>User <code>{uid}</code> is now UNBANNED.</b></blockquote>",
             reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,

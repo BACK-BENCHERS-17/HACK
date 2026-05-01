@@ -1,7 +1,7 @@
+import asyncio
 import io
 import json
 import logging
-import threading
 from datetime import datetime, timedelta
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -19,13 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-    """MongoDB-backed data layer for the Hack Store Telegram bot.
-
-    All documents that previously had auto-increment SQL ids now use a
-    monotonically increasing integer (`_id`) generated via the `counters`
-    collection. The wrapper also exposes an `id` field on returned
-    documents so the rest of the bot code can keep using `doc['id']`.
-    """
+    """Async wrapper for MongoDB-backed data layer."""
 
     AUTO_ID_COLLECTIONS = (
         "products", "plans", "keys", "purchases",
@@ -35,7 +29,6 @@ class DatabaseManager:
     def __init__(self):
         self.client = MongoClient(MONGO_URI)
         self.db = self.client[MONGO_DB_NAME]
-        self.lock = threading.Lock()
         self._init_indexes()
 
     # ------------------------------------------------------------------
@@ -45,8 +38,6 @@ class DatabaseManager:
         try:
             self.db.products.create_index("name", unique=True)
             self.db.keys.create_index("key_value", unique=True)
-            # UTR must be globally unique (replay protection) but allow many
-            # PENDING orders that have not yet captured a UTR (sparse).
             self.db.fund_requests.create_index("utr", unique=True, sparse=True)
             self.db.fund_requests.create_index("order_id", unique=True, sparse=True)
             self.db.users.create_index("verified")
@@ -60,18 +51,19 @@ class DatabaseManager:
         except Exception as e:
             logger.warning(f"Index init warning: {e}")
 
-    def _next_id(self, name: str) -> int:
-        doc = self.db.counters.find_one_and_update(
-            {"_id": name},
-            {"$inc": {"seq": 1}},
-            upsert=True,
-            return_document=ReturnDocument.AFTER,
-        )
-        return doc["seq"]
+    async def _next_id(self, name: str) -> int:
+        def _op():
+            doc = self.db.counters.find_one_and_update(
+                {"_id": name},
+                {"$inc": {"seq": 1}},
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+            return doc["seq"]
+        return await asyncio.to_thread(_op)
 
     @staticmethod
     def _wrap(doc: Optional[dict]) -> dict:
-        """Add 'id' alias for '_id' on auto-id docs, leave others alone."""
         if not doc:
             return {}
         if "_id" in doc and "id" not in doc and isinstance(doc["_id"], int):
@@ -84,45 +76,45 @@ class DatabaseManager:
     # ------------------------------------------------------------------
     # Settings (key/value)
     # ------------------------------------------------------------------
-    def seed_default_settings(self, defaults: Dict[str, Any]):
-        """Insert defaults only if the key does not already exist."""
-        for k, v in defaults.items():
-            if not self.db.settings.find_one({"_id": k}):
-                self.db.settings.insert_one({"_id": k, "value": v})
+    async def seed_default_settings(self, defaults: Dict[str, Any]):
+        def _op():
+            for k, v in defaults.items():
+                if not self.db.settings.find_one({"_id": k}):
+                    self.db.settings.insert_one({"_id": k, "value": v})
+        await asyncio.to_thread(_op)
 
-    def get_setting(self, key: str, default: str = "") -> str:
-        doc = self.db.settings.find_one({"_id": key})
-        return doc["value"] if doc and doc.get("value") is not None else default
+    async def get_setting(self, key: str, default: str = "") -> str:
+        def _op():
+            doc = self.db.settings.find_one({"_id": key})
+            return doc["value"] if doc and doc.get("value") is not None else default
+        return await asyncio.to_thread(_op)
 
-    def set_setting(self, key: str, value: Any):
-        with self.lock:
-            self.db.settings.update_one(
-                {"_id": key}, {"$set": {"value": value}}, upsert=True
-            )
+    async def set_setting(self, key: str, value: Any):
+        await asyncio.to_thread(self.db.settings.update_one,
+                                {"_id": key}, {"$set": {"value": value}}, True)
 
     # ------------------------------------------------------------------
     # Admin logs
     # ------------------------------------------------------------------
-    def log_admin_action(self, admin_id: int, action: str, target: str):
+    async def log_admin_action(self, admin_id: int, action: str, target: str):
         try:
-            with self.lock:
-                _id = self._next_id("admin_logs")
-                self.db.admin_logs.insert_one({
-                    "_id": _id,
-                    "admin_id": admin_id,
-                    "action": action,
-                    "target": target,
-                    "timestamp": datetime.now().isoformat(),
-                })
+            _id = await self._next_id("admin_logs")
+            await asyncio.to_thread(self.db.admin_logs.insert_one, {
+                "_id": _id,
+                "admin_id": admin_id,
+                "action": action,
+                "target": target,
+                "timestamp": datetime.now().isoformat(),
+            })
         except Exception as e:
             logger.error(f"Error logging admin action: {e}")
 
     # ------------------------------------------------------------------
     # Users
     # ------------------------------------------------------------------
-    def add_user(self, user_id: int, username: str, first_name: str,
+    async def add_user(self, user_id: int, username: str, first_name: str,
                  referrer_id: Optional[int] = None) -> bool:
-        with self.lock:
+        def _op():
             existing = self.db.users.find_one({"_id": user_id})
             now_iso = datetime.now().isoformat()
             if not existing:
@@ -157,48 +149,41 @@ class DatabaseManager:
                     }},
                 )
                 return False
+        return await asyncio.to_thread(_op)
 
-    def get_user(self, user_id: int) -> dict:
-        try:
+    async def get_user(self, user_id: int) -> dict:
+        def _op():
             doc = self.db.users.find_one({"_id": user_id})
-            if not doc:
-                return {}
+            if not doc: return {}
             doc.setdefault("user_id", doc["_id"])
             return doc
-        except Exception as e:
-            logger.error(f"DB Error getting user: {e}")
-            return {}
+        return await asyncio.to_thread(_op)
 
-    def update_balance(self, user_id: int, amount: int):
-        with self.lock:
-            self.db.users.update_one(
-                {"_id": user_id}, {"$inc": {"balance": amount}}
-            )
+    async def update_balance(self, user_id: int, amount: int):
+        await asyncio.to_thread(self.db.users.update_one,
+                                {"_id": user_id}, {"$inc": {"balance": amount}})
 
-    def ban_user(self, user_id: int, state: int):
-        with self.lock:
-            self.db.users.update_one(
-                {"_id": user_id}, {"$set": {"is_banned": int(state)}}
-            )
+    async def ban_user(self, user_id: int, state: int):
+        await asyncio.to_thread(self.db.users.update_one,
+                                {"_id": user_id}, {"$set": {"is_banned": int(state)}})
 
-    def verify_user(self, user_id: int):
-        with self.lock:
-            self.db.users.update_one(
-                {"_id": user_id}, {"$set": {"verified": 1}}
-            )
+    async def verify_user(self, user_id: int):
+        await asyncio.to_thread(self.db.users.update_one,
+                                {"_id": user_id}, {"$set": {"verified": 1}})
 
-    def get_all_users_count(self) -> int:
-        return self.db.users.count_documents({"verified": 1})
+    async def get_all_users_count(self) -> int:
+        return await asyncio.to_thread(self.db.users.count_documents, {"verified": 1})
 
-    def get_all_verified_user_ids(self) -> List[int]:
-        return [u["_id"] for u in self.db.users.find({"verified": 1}, {"_id": 1})]
+    async def get_all_verified_user_ids(self) -> List[int]:
+        def _op():
+            return [u["_id"] for u in self.db.users.find({"verified": 1}, {"_id": 1})]
+        return await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
     # Resellers
     # ------------------------------------------------------------------
-    def set_reseller(self, user_id: int, days: int, discount: float):
-        """Enable reseller status for a user with expiry and discount."""
-        with self.lock:
+    async def set_reseller(self, user_id: int, days: int, discount: float):
+        def _op():
             expiry = (datetime.now() + timedelta(days=days)).isoformat()
             self.db.users.update_one(
                 {"_id": user_id},
@@ -208,58 +193,45 @@ class DatabaseManager:
                     "reseller_discount": float(discount)
                 }}
             )
+        await asyncio.to_thread(_op)
 
-    def remove_reseller(self, user_id: int):
-        """Disable reseller status."""
-        with self.lock:
-            self.db.users.update_one(
-                {"_id": user_id},
-                {"$set": {"is_reseller": False}}
-            )
+    async def remove_reseller(self, user_id: int):
+        await asyncio.to_thread(self.db.users.update_one,
+                                {"_id": user_id}, {"$set": {"is_reseller": False}})
 
-    def get_resellers(self) -> List[dict]:
-        """Get all users who are marked as resellers."""
-        return list(self.db.users.find({"is_reseller": True}))
+    async def get_resellers(self) -> List[dict]:
+        return await asyncio.to_thread(lambda: list(self.db.users.find({"is_reseller": True})))
 
-    def is_active_reseller(self, user_id: int) -> Tuple[bool, float]:
-        """Check if user is an active reseller and return their discount."""
-        user = self.db.users.find_one({"_id": user_id})
-        if not user or not user.get("is_reseller"):
+    async def is_active_reseller(self, user_id: int) -> Tuple[bool, float]:
+        def _op():
+            user = self.db.users.find_one({"_id": user_id})
+            if not user or not user.get("is_reseller"):
+                return False, 0.0
+            expiry_str = user.get("reseller_expiry")
+            if not expiry_str: return False, 0.0
+            try:
+                expiry = datetime.fromisoformat(expiry_str)
+                if datetime.now() < expiry:
+                    return True, float(user.get("reseller_discount", 0.0))
+            except Exception: pass
             return False, 0.0
+        return await asyncio.to_thread(_op)
 
-        expiry_str = user.get("reseller_expiry")
-        if not expiry_str:
-            return False, 0.0
-
-        try:
-            expiry = datetime.fromisoformat(expiry_str)
-            if datetime.now() < expiry:
-                return True, float(user.get("reseller_discount", 0.0))
-        except Exception:
-            pass
-
-        # If expired, we could automatically turn it off here
-        return False, 0.0
-
-    def find_user_by_id_or_username(self, query: str) -> Optional[dict]:
-        """Find a user by numeric ID or @username."""
-        if not query: return None
-        
-        # Try numeric ID
-        if query.isdigit():
-            user = self.db.users.find_one({"_id": int(query)})
-            if user: return user
-            
-        # Try username
-        clean_uname = query.replace("@", "").strip()
-        user = self.db.users.find_one({"username": {"$regex": f"^{clean_uname}$", "$options": "i"}})
-        return user
+    async def find_user_by_id_or_username(self, query: str) -> Optional[dict]:
+        def _op():
+            if not query: return None
+            if query.isdigit():
+                user = self.db.users.find_one({"_id": int(query)})
+                if user: return user
+            clean_uname = query.replace("@", "").strip()
+            return self.db.users.find_one({"username": {"$regex": f"^{clean_uname}$", "$options": "i"}})
+        return await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
     # Promo codes
     # ------------------------------------------------------------------
-    def create_promo(self, code: str, reward_paise: int, max_uses: int) -> bool:
-        with self.lock:
+    async def create_promo(self, code: str, reward_paise: int, max_uses: int) -> bool:
+        def _op():
             if self.db.promo_codes.find_one({"_id": code}):
                 return False
             self.db.promo_codes.insert_one({
@@ -270,434 +242,351 @@ class DatabaseManager:
                 "created_at": datetime.now().isoformat(),
             })
             return True
+        return await asyncio.to_thread(_op)
 
-    def redeem_promo(self, user_id: int, code: str) -> Tuple[bool, str, int]:
-        with self.lock:
+    async def redeem_promo(self, user_id: int, code: str) -> Tuple[bool, str, int]:
+        def _op():
             promo = self.db.promo_codes.find_one({"_id": code})
-            if not promo:
-                return False, "Invalid Promo Code.", 0
+            if not promo: return False, "Invalid Promo Code.", 0
             if promo["current_uses"] >= promo["max_uses"]:
                 return False, "Promo Code has reached its maximum uses.", 0
             already = self.db.redeemed_promos.find_one({"user_id": user_id, "code": code})
-            if already:
-                return False, "You have already redeemed this code.", 0
+            if already: return False, "You have already redeemed this code.", 0
             reward = int(promo["reward_paise"])
             self.db.users.update_one({"_id": user_id}, {"$inc": {"balance": reward}})
             self.db.promo_codes.update_one({"_id": code}, {"$inc": {"current_uses": 1}})
             self.db.redeemed_promos.insert_one({
-                "user_id": user_id,
-                "code": code,
+                "user_id": user_id, "code": code,
                 "redeemed_at": datetime.now().isoformat(),
             })
             return True, "Success", reward
+        return await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
     # Leaderboard
     # ------------------------------------------------------------------
-    def get_leaderboard(self) -> List[dict]:
-        cursor = self.db.users.find(
-            {"verified": 1, "total_spent": {"$gt": 0}},
-            {"first_name": 1, "total_spent": 1},
-        ).sort("total_spent", DESCENDING).limit(10)
-        return [
-            {"first_name": d.get("first_name") or "User", "total_spent": d.get("total_spent", 0)}
-            for d in cursor
-        ]
+    async def get_leaderboard(self) -> List[dict]:
+        def _op():
+            cursor = self.db.users.find(
+                {"verified": 1, "total_spent": {"$gt": 0}},
+                {"first_name": 1, "total_spent": 1},
+            ).sort("total_spent", DESCENDING).limit(10)
+            return [{"first_name": d.get("first_name") or "User", "total_spent": d.get("total_spent", 0)} for d in cursor]
+        return await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
     # Products
     # ------------------------------------------------------------------
-    def get_active_products(self) -> List[dict]:
-        return self._wrap_many(self.db.products.find({"is_active": 1}).sort("name", ASCENDING))
+    async def get_active_products(self) -> List[dict]:
+        return await asyncio.to_thread(lambda: self._wrap_many(self.db.products.find({"is_active": 1}).sort("name", ASCENDING)))
 
-    def get_all_products(self) -> List[dict]:
-        return self._wrap_many(self.db.products.find({}).sort("name", ASCENDING))
+    async def get_all_products(self) -> List[dict]:
+        return await asyncio.to_thread(lambda: self._wrap_many(self.db.products.find({}).sort("name", ASCENDING)))
 
-    def get_product(self, prod_id: int) -> dict:
-        return self._wrap(self.db.products.find_one({"_id": int(prod_id)}))
+    async def get_product(self, prod_id: int) -> dict:
+        return await asyncio.to_thread(lambda: self._wrap(self.db.products.find_one({"_id": int(prod_id)})))
 
-    def add_product(self, name: str, desc: str) -> int:
-        with self.lock:
-            _id = self._next_id("products")
+    async def add_product(self, name: str, desc: str) -> int:
+        _id = await self._next_id("products")
+        def _op():
             try:
                 self.db.products.insert_one({
-                    "_id": _id,
-                    "name": name,
-                    "description": desc,
-                    "is_active": 1,
-                    "image_url": None,
-                    "download_link": "Link not set",
+                    "_id": _id, "name": name, "description": desc,
+                    "is_active": 1, "image_url": None, "download_link": "Link not set",
                 })
-            except DuplicateKeyError:
-                pass
+            except DuplicateKeyError: pass
             return _id
+        return await asyncio.to_thread(_op)
 
-    def toggle_product(self, prod_id: int):
-        with self.lock:
+    async def toggle_product(self, prod_id: int):
+        def _op():
             doc = self.db.products.find_one({"_id": int(prod_id)})
-            if not doc:
-                return
+            if not doc: return
             new_state = 0 if doc.get("is_active", 1) == 1 else 1
-            self.db.products.update_one(
-                {"_id": int(prod_id)}, {"$set": {"is_active": new_state}}
-            )
+            self.db.products.update_one({"_id": int(prod_id)}, {"$set": {"is_active": new_state}})
+        await asyncio.to_thread(_op)
 
-    def delete_product(self, prod_id: int):
-        with self.lock:
-            prod_id = int(prod_id)
-            plan_ids = [p["_id"] for p in self.db.plans.find({"product_id": prod_id}, {"_id": 1})]
+    async def delete_product(self, prod_id: int):
+        def _op():
+            p_id = int(prod_id)
+            plan_ids = [p["_id"] for p in self.db.plans.find({"product_id": p_id}, {"_id": 1})]
             if plan_ids:
                 self.db.keys.delete_many({"plan_id": {"$in": plan_ids}})
                 self.db.plans.delete_many({"_id": {"$in": plan_ids}})
-            self.db.products.delete_one({"_id": prod_id})
+            self.db.products.delete_one({"_id": p_id})
+        await asyncio.to_thread(_op)
 
-    def update_product_description(self, prod_id: int, new_desc: str):
-        with self.lock:
-            self.db.products.update_one(
-                {"_id": int(prod_id)}, {"$set": {"description": new_desc}}
-            )
+    async def update_product_description(self, prod_id: int, new_desc: str):
+        await asyncio.to_thread(self.db.products.update_one, {"_id": int(prod_id)}, {"$set": {"description": new_desc}})
 
     # ------------------------------------------------------------------
     # Plans
     # ------------------------------------------------------------------
-    def get_plans(self, prod_id: int) -> List[dict]:
-        return self._wrap_many(
-            self.db.plans.find({"product_id": int(prod_id)}).sort("price", ASCENDING)
-        )
+    async def get_plans(self, prod_id: int) -> List[dict]:
+        return await asyncio.to_thread(lambda: self._wrap_many(self.db.plans.find({"product_id": int(prod_id)}).sort("price", ASCENDING)))
 
-    def get_plan(self, plan_id: int) -> dict:
-        plan = self.db.plans.find_one({"_id": int(plan_id)})
-        if not plan:
-            return {}
-        plan = self._wrap(plan)
-        prod = self.db.products.find_one({"_id": plan.get("product_id")})
-        plan["product_name"] = prod["name"] if prod else "Unknown"
-        return plan
+    async def get_plan(self, plan_id: int) -> dict:
+        def _op():
+            plan = self.db.plans.find_one({"_id": int(plan_id)})
+            if not plan: return {}
+            plan = self._wrap(plan)
+            prod = self.db.products.find_one({"_id": plan.get("product_id")})
+            plan["product_name"] = prod["name"] if prod else "Unknown"
+            return plan
+        return await asyncio.to_thread(_op)
 
-    def add_plan(self, prod_id: int, duration: str, price: int):
-        with self.lock:
-            _id = self._next_id("plans")
-            self.db.plans.insert_one({
-                "_id": _id,
-                "product_id": int(prod_id),
-                "duration": duration,
-                "price": int(price),
-            })
+    async def add_plan(self, prod_id: int, duration: str, price: int):
+        _id = await self._next_id("plans")
+        await asyncio.to_thread(self.db.plans.insert_one, {
+            "_id": _id, "product_id": int(prod_id), "duration": duration, "price": int(price),
+        })
 
-    def delete_plan(self, plan_id: int):
-        with self.lock:
-            plan_id = int(plan_id)
-            self.db.keys.delete_many({"plan_id": plan_id})
-            self.db.plans.delete_one({"_id": plan_id})
+    async def delete_plan(self, plan_id: int):
+        def _op():
+            p_id = int(plan_id)
+            self.db.keys.delete_many({"plan_id": p_id})
+            self.db.plans.delete_one({"_id": p_id})
+        await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
     # Keys
     # ------------------------------------------------------------------
-    def add_keys(self, plan_id: int, keys: List[str]) -> int:
-        with self.lock:
+    async def add_keys(self, plan_id: int, keys: List[str]) -> int:
+        def _op():
             count = 0
             for k in keys:
-                if not k:
-                    continue
+                if not k: continue
                 try:
-                    _id = self._next_id("keys")
+                    # Need unique IDs for each key. Calling _next_id in a loop is slow,
+                    # but we are in a thread here.
+                    # Actually, we can't call await inside a synchronous _op thread.
+                    # We should get the next sequence and increment it ourselves or call counters multiple times.
+                    # For simplicity, we'll just use a loop with synchronous find_one_and_update.
+                    next_id_doc = self.db.counters.find_one_and_update(
+                        {"_id": "keys"}, {"$inc": {"seq": 1}},
+                        upsert=True, return_document=ReturnDocument.AFTER
+                    )
+                    _id = next_id_doc["seq"]
                     self.db.keys.insert_one({
-                        "_id": _id,
-                        "plan_id": int(plan_id),
-                        "key_value": k,
-                        "is_sold": 0,
-                        "sold_to": None,
-                        "purchase_date": None,
-                        "expiry_date": None,
+                        "_id": _id, "plan_id": int(plan_id), "key_value": k,
+                        "is_sold": 0, "sold_to": None, "purchase_date": None, "expiry_date": None,
                     })
                     count += 1
-                except DuplicateKeyError:
-                    pass
+                except DuplicateKeyError: pass
             return count
+        return await asyncio.to_thread(_op)
 
-    def get_stock_summary(self) -> Dict[str, List[Dict[str, Any]]]:
-        summary: Dict[str, List[Dict[str, Any]]] = {}
-        for prod in self.db.products.find({"is_active": 1}).sort("name", ASCENDING):
-            plans = list(self.db.plans.find({"product_id": prod["_id"]}).sort("price", ASCENDING))
-            entries = []
-            for plan in plans:
-                count = self.db.keys.count_documents({"plan_id": plan["_id"], "is_sold": 0})
-                entries.append({"duration": plan["duration"], "count": count})
-            summary[prod["name"]] = entries
-        return summary
+    async def get_stock_summary(self) -> Dict[str, List[Dict[str, Any]]]:
+        def _op():
+            summary = {}
+            for prod in self.db.products.find({"is_active": 1}).sort("name", ASCENDING):
+                plans = list(self.db.plans.find({"product_id": prod["_id"]}).sort("price", ASCENDING))
+                entries = []
+                for plan in plans:
+                    count = self.db.keys.count_documents({"plan_id": plan["_id"], "is_sold": 0})
+                    entries.append({"duration": plan["duration"], "count": count})
+                summary[prod["name"]] = entries
+            return summary
+        return await asyncio.to_thread(_op)
 
-    def get_available_key_count(self, plan_id: int) -> int:
-        return self.db.keys.count_documents({"plan_id": int(plan_id), "is_sold": 0})
+    async def get_available_key_count(self, plan_id: int) -> int:
+        return await asyncio.to_thread(self.db.keys.count_documents, {"plan_id": int(plan_id), "is_sold": 0})
 
-    def purchase_key_automated(self, user_id: int, plan_id: int) -> Tuple[bool, str, dict]:
-        """Specific version for automated delivery when admin approves a request."""
-        with self.lock:
+    async def purchase_key_automated(self, user_id: int, plan_id: int) -> Tuple[bool, str, dict]:
+        def _op():
             plan = self.db.plans.find_one({"_id": int(plan_id)})
-            if not plan:
-                return False, "Plan not found.", {}
-
+            if not plan: return False, "Plan not found.", {}
             product = self.db.products.find_one({"_id": plan["product_id"]})
             product_name = product["name"] if product else "Unknown"
-
             key_doc = self.db.keys.find_one({"plan_id": int(plan_id), "is_sold": 0})
-            if not key_doc:
-                return False, "Out of stock.", {}
-
+            if not key_doc: return False, "Out of stock.", {}
             days = 30
             try:
                 digits = "".join(filter(str.isdigit, plan["duration"]))
                 if digits: days = int(digits)
             except Exception: pass
-
             expiry_date = (datetime.now() + timedelta(days=days)).isoformat()
             purchase_date = datetime.now().isoformat()
-
-            # Mark key as sold
-            self.db.keys.update_one(
-                {"_id": key_doc["_id"]},
-                {"$set": {
-                    "is_sold": 1,
-                    "sold_to": user_id,
-                    "purchase_date": purchase_date,
-                    "expiry_date": expiry_date,
-                }},
+            self.db.keys.update_one({"_id": key_doc["_id"]}, {"$set": {
+                "is_sold": 1, "sold_to": user_id, "purchase_date": purchase_date, "expiry_date": expiry_date,
+            }})
+            # Get next purchase ID synchronously in this thread
+            next_p_doc = self.db.counters.find_one_and_update(
+                {"_id": "purchases"}, {"$inc": {"seq": 1}},
+                upsert=True, return_document=ReturnDocument.AFTER
             )
-
-            # Record purchase
-            pid = self._next_id("purchases")
             self.db.purchases.insert_one({
-                "_id": pid,
-                "user_id": user_id,
-                "plan_id": int(plan_id),
-                "key_id": key_doc["_id"],
-                "amount": int(plan["price"]),
-                "purchase_date": purchase_date,
+                "_id": next_p_doc["seq"], "user_id": user_id, "plan_id": int(plan_id),
+                "key_id": key_doc["_id"], "amount": int(plan["price"]), "purchase_date": purchase_date,
             })
-
             return True, "Success", {
-                "key": key_doc["key_value"],
-                "expiry": expiry_date,
-                "product": product_name,
-                "duration": plan["duration"]
+                "key": key_doc["key_value"], "expiry": expiry_date,
+                "product": product_name, "duration": plan["duration"]
             }
+        return await asyncio.to_thread(_op)
 
-    def get_user_keys(self, user_id: int, offset: int = 0, limit: int = 5) -> List[dict]:
-        cursor = (
-            self.db.keys.find({"sold_to": user_id})
-            .sort("purchase_date", DESCENDING)
-            .skip(offset)
-            .limit(limit)
-        )
-        out = []
-        for k in cursor:
-            plan = self.db.plans.find_one({"_id": k.get("plan_id")})
-            prod = self.db.products.find_one({"_id": plan["product_id"]}) if plan else None
-            out.append({
-                "name": prod["name"] if prod else "Unknown",
-                "duration": plan["duration"] if plan else "",
-                "key_value": k["key_value"],
-                "expiry_date": k.get("expiry_date") or "",
-            })
-        return out
+    async def get_user_keys(self, user_id: int, offset: int = 0, limit: int = 5) -> List[dict]:
+        def _op():
+            cursor = (self.db.keys.find({"sold_to": user_id}).sort("purchase_date", DESCENDING).skip(offset).limit(limit))
+            out = []
+            for k in cursor:
+                plan = self.db.plans.find_one({"_id": k.get("plan_id")})
+                prod = self.db.products.find_one({"_id": plan["product_id"]}) if plan else None
+                out.append({
+                    "name": prod["name"] if prod else "Unknown",
+                    "duration": plan["duration"] if plan else "",
+                    "key_value": k["key_value"], "expiry_date": k.get("expiry_date") or "",
+                })
+            return out
+        return await asyncio.to_thread(_op)
 
-    def get_user_keys_count(self, user_id: int) -> int:
-        return self.db.keys.count_documents({"sold_to": user_id})
+    async def get_user_keys_count(self, user_id: int) -> int:
+        return await asyncio.to_thread(self.db.keys.count_documents, {"sold_to": user_id})
 
     # ------------------------------------------------------------------
     # Fund requests
     # ------------------------------------------------------------------
-    def create_fund_request(self, user_id: int, utr: str, plan_id: Optional[int] = None) -> bool:
-        with self.lock:
-            if self.db.fund_requests.find_one({"utr": utr}):
-                return False
+    async def create_fund_request(self, user_id: int, utr: str, plan_id: Optional[int] = None) -> bool:
+        def _op():
+            if self.db.fund_requests.find_one({"utr": utr}): return False
             try:
-                _id = self._next_id("fund_requests")
+                next_f_doc = self.db.counters.find_one_and_update(
+                    {"_id": "fund_requests"}, {"$inc": {"seq": 1}},
+                    upsert=True, return_document=ReturnDocument.AFTER
+                )
                 self.db.fund_requests.insert_one({
-                    "_id": _id,
-                    "user_id": user_id,
-                    "plan_id": plan_id,
-                    "amount_requested": 0,
-                    "utr": utr,
-                    "status": "PENDING",
-                    "request_date": datetime.now().isoformat(),
-                    "resolved_date": None,
+                    "_id": next_f_doc["seq"], "user_id": user_id, "plan_id": plan_id,
+                    "amount_requested": 0, "utr": utr, "status": "PENDING",
+                    "request_date": datetime.now().isoformat(), "resolved_date": None,
                 })
                 return True
-            except DuplicateKeyError:
-                return False
+            except DuplicateKeyError: return False
+        return await asyncio.to_thread(_op)
 
-    def get_pending_fund_requests(self) -> List[dict]:
-        out = []
-        for r in self.db.fund_requests.find({"status": "PENDING"}).sort("request_date", ASCENDING):
-            r = self._wrap(r)
-            u = self.db.users.find_one({"_id": r["user_id"]}) if r.get("user_id") else None
-            r["username"] = u.get("username") if u else None
-            r["first_name"] = u.get("first_name") if u else None
-            out.append(r)
-        return out
+    async def get_pending_fund_requests(self) -> List[dict]:
+        def _op():
+            out = []
+            for r in self.db.fund_requests.find({"status": "PENDING"}).sort("request_date", ASCENDING):
+                r = self._wrap(r)
+                u = self.db.users.find_one({"_id": r["user_id"]}) if r.get("user_id") else None
+                r["username"] = u.get("username") if u else None
+                r["first_name"] = u.get("first_name") if u else None
+                out.append(r)
+            return out
+        return await asyncio.to_thread(_op)
 
-    def update_fund_request(self, req_id: int, status: str, amount: int = 0):
-        with self.lock:
-            self.db.fund_requests.update_one(
-                {"_id": int(req_id)},
-                {"$set": {
-                    "status": status,
-                    "amount_requested": int(amount),
-                    "resolved_date": datetime.now().isoformat(),
-                }},
-            )
+    async def update_fund_request(self, req_id: int, status: str, amount: int = 0):
+        await asyncio.to_thread(self.db.fund_requests.update_one, {"_id": int(req_id)},
+                                {"$set": {"status": status, "amount_requested": int(amount), "resolved_date": datetime.now().isoformat()}})
 
-    def get_fund_request(self, req_id: int) -> dict:
-        return self._wrap(self.db.fund_requests.find_one({"_id": int(req_id)}))
+    async def get_fund_request(self, req_id: int) -> dict:
+        return await asyncio.to_thread(lambda: self._wrap(self.db.fund_requests.find_one({"_id": int(req_id)})))
 
     # ------------------------------------------------------------------
     # Order-id based fund requests (used by the auto-UPI flow)
     # ------------------------------------------------------------------
-    def create_fund_request_with_order(self, user_id: int, order_id: str,
+    async def create_fund_request_with_order(self, user_id: int, order_id: str,
                                        plan_id: int, amount: float) -> bool:
-        """Create a PENDING fund request bound to a UPI order id (no UTR yet)."""
-        with self.lock:
-            if self.db.fund_requests.find_one({"order_id": order_id}):
-                return False
+        def _op():
+            if self.db.fund_requests.find_one({"order_id": order_id}): return False
             try:
-                _id = self._next_id("fund_requests")
+                next_f_doc = self.db.counters.find_one_and_update(
+                    {"_id": "fund_requests"}, {"$inc": {"seq": 1}},
+                    upsert=True, return_document=ReturnDocument.AFTER
+                )
                 self.db.fund_requests.insert_one({
-                    "_id": _id,
-                    "user_id": user_id,
-                    "order_id": order_id,
+                    "_id": next_f_doc["seq"], "user_id": user_id, "order_id": order_id,
                     "plan_id": int(plan_id) if plan_id is not None else None,
-                    "amount_requested": float(amount),
-                    "utr": None,
-                    "transaction_id": None,
-                    "sender_name": None,
-                    "payment_time": None,
-                    "status": "PENDING",
-                    "request_date": datetime.now().isoformat(),
-                    "resolved_date": None,
+                    "amount_requested": float(amount), "utr": None, "transaction_id": None,
+                    "sender_name": None, "payment_time": None, "status": "PENDING",
+                    "request_date": datetime.now().isoformat(), "resolved_date": None,
                 })
                 return True
-            except DuplicateKeyError:
-                return False
+            except DuplicateKeyError: return False
+        return await asyncio.to_thread(_op)
 
-    def get_fund_request_by_order(self, order_id: str) -> dict:
-        return self._wrap(self.db.fund_requests.find_one({"order_id": order_id}))
+    async def get_fund_request_by_order(self, order_id: str) -> dict:
+        return await asyncio.to_thread(lambda: self._wrap(self.db.fund_requests.find_one({"order_id": order_id})))
 
-    def update_fund_request_by_order(self, order_id: str, status: str,
+    async def update_fund_request_by_order(self, order_id: str, status: str,
                                      utr: Optional[str] = None,
                                      transaction_id: Optional[str] = None,
                                      sender_name: Optional[str] = None,
                                      payment_time: Optional[str] = None,
                                      key_value: Optional[str] = None) -> bool:
-        """Update a fund request found by order_id; returns False if a
-        duplicate UTR collision is detected (replay protection)."""
-        with self.lock:
-            sets = {"status": status,
-                    "resolved_date": datetime.now().isoformat()}
-            if transaction_id is not None:
-                sets["transaction_id"] = transaction_id
-            if sender_name is not None:
-                sets["sender_name"] = sender_name
-            if payment_time is not None:
-                sets["payment_time"] = payment_time
-            if key_value is not None:
-                sets["delivered_key"] = key_value
+        def _op():
+            sets = {"status": status, "resolved_date": datetime.now().isoformat()}
+            if transaction_id is not None: sets["transaction_id"] = transaction_id
+            if sender_name is not None: sets["sender_name"] = sender_name
+            if payment_time is not None: sets["payment_time"] = payment_time
+            if key_value is not None: sets["delivered_key"] = key_value
             if utr:
                 sets["utr"] = utr
-                # Replay check: ensure this UTR isn't already attached to a
-                # different fund request.
-                clash = self.db.fund_requests.find_one({
-                    "utr": utr,
-                    "order_id": {"$ne": order_id},
-                })
-                if clash:
-                    logger.warning(
-                        "UTR replay blocked: utr=%s already used by order=%s "
-                        "(attempted by order=%s)",
-                        utr, clash.get("order_id"), order_id,
-                    )
-                    return False
+                clash = self.db.fund_requests.find_one({"utr": utr, "order_id": {"$ne": order_id}})
+                if clash: return False
             try:
-                self.db.fund_requests.update_one(
-                    {"order_id": order_id},
-                    {"$set": sets},
-                )
+                self.db.fund_requests.update_one({"order_id": order_id}, {"$set": sets})
                 return True
-            except DuplicateKeyError:
-                logger.warning("UTR duplicate-key on update for order=%s utr=%s",
-                               order_id, utr)
-                return False
+            except DuplicateKeyError: return False
+        return await asyncio.to_thread(_op)
 
-    def is_utr_already_used(self, utr: str,
+    async def is_utr_already_used(self, utr: str,
                             except_order_id: Optional[str] = None) -> bool:
-        """True if `utr` is already recorded against a different order."""
-        if not utr:
-            return False
-        q = {"utr": utr}
-        if except_order_id:
-            q["order_id"] = {"$ne": except_order_id}
-        return self.db.fund_requests.find_one(q) is not None
+        def _op():
+            if not utr: return False
+            q = {"utr": utr}
+            if except_order_id: q["order_id"] = {"$ne": except_order_id}
+            return self.db.fund_requests.find_one(q) is not None
+        return await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
     # Tickets
     # ------------------------------------------------------------------
-    def create_ticket(self, user_id: int, message: str) -> int:
-        with self.lock:
-            _id = self._next_id("tickets")
-            self.db.tickets.insert_one({
-                "_id": _id,
-                "user_id": user_id,
-                "message": message,
-                "reply": None,
-                "status": "OPEN",
-                "created_at": datetime.now().isoformat(),
-                "resolved_at": None,
-            })
-            return _id
+    async def create_ticket(self, user_id: int, message: str) -> int:
+        _id = await self._next_id("tickets")
+        await asyncio.to_thread(self.db.tickets.insert_one, {
+            "_id": _id, "user_id": user_id, "message": message, "reply": None,
+            "status": "OPEN", "created_at": datetime.now().isoformat(), "resolved_at": None,
+        })
+        return _id
 
-    def get_open_tickets(self) -> List[dict]:
-        return self._wrap_many(
-            self.db.tickets.find({"status": "OPEN"}).sort("created_at", ASCENDING)
-        )
+    async def get_open_tickets(self) -> List[dict]:
+        return await asyncio.to_thread(lambda: self._wrap_many(self.db.tickets.find({"status": "OPEN"}).sort("created_at", ASCENDING)))
 
-    def reply_ticket(self, ticket_id: int, reply: str) -> int:
-        with self.lock:
+    async def reply_ticket(self, ticket_id: int, reply: str) -> int:
+        def _op():
             ticket = self.db.tickets.find_one({"_id": int(ticket_id)})
-            if not ticket:
-                return 0
-            self.db.tickets.update_one(
-                {"_id": int(ticket_id)},
-                {"$set": {
-                    "reply": reply,
-                    "status": "CLOSED",
-                    "resolved_at": datetime.now().isoformat(),
-                }},
-            )
+            if not ticket: return 0
+            self.db.tickets.update_one({"_id": int(ticket_id)}, {"$set": {
+                "reply": reply, "status": "CLOSED", "resolved_at": datetime.now().isoformat(),
+            }})
             return ticket["user_id"]
+        return await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
     # Stats
     # ------------------------------------------------------------------
-    def get_global_stats(self) -> Tuple[int, int, int, int]:
-        users = self.db.users.count_documents({"verified": 1})
-        agg = list(self.db.purchases.aggregate([
-            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
-        ]))
-        revenue = int(agg[0]["total"]) if agg else 0
-        sold_keys = self.db.keys.count_documents({"is_sold": 1})
-        avail_keys = self.db.keys.count_documents({"is_sold": 0})
-        return users, revenue, sold_keys, avail_keys
+    async def get_global_stats(self) -> Tuple[int, int, int, int]:
+        def _op():
+            users = self.db.users.count_documents({"verified": 1})
+            agg = list(self.db.purchases.aggregate([{"$group": {"_id": None, "total": {"$sum": "$amount"}}}]))
+            revenue = int(agg[0]["total"]) if agg else 0
+            sold_keys = self.db.keys.count_documents({"is_sold": 1})
+            avail_keys = self.db.keys.count_documents({"is_sold": 0})
+            return users, revenue, sold_keys, avail_keys
+        return await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
     # Backup / Export
     # ------------------------------------------------------------------
-    def export_database(self) -> bytes:
-        """Return a JSON dump of all collections (BSON-safe)."""
-        snapshot = {}
-        collections = [
-            "users", "products", "plans", "keys", "purchases",
-            "fund_requests", "tickets", "admin_logs", "settings",
-            "promo_codes", "redeemed_promos", "counters",
-        ]
-        for col in collections:
-            snapshot[col] = list(self.db[col].find({}))
-        return bson_dumps(snapshot, indent=2).encode("utf-8")
+    async def export_database(self) -> bytes:
+        def _op():
+            snapshot = {}
+            collections = [
+                "users", "products", "plans", "keys", "purchases",
+                "fund_requests", "tickets", "admin_logs", "settings",
+                "promo_codes", "redeemed_promos", "counters",
+            ]
+            for col in collections: snapshot[col] = list(self.db[col].find({}))
+            return bson_dumps(snapshot, indent=2).encode("utf-8")
+        return await asyncio.to_thread(_op)

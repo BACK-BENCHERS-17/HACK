@@ -192,10 +192,10 @@ def _bearer_token(request: web.Request) -> str:
     return ""
 
 
-def _get_session(token: str) -> Optional[dict]:
+async def _get_session(token: str) -> Optional[dict]:
     if not token:
         return None
-    return sessions_col.find_one({"session_token": token})
+    return await asyncio.to_thread(sessions_col.find_one, {"session_token": token})
 
 
 def _normalise_app_password(raw: str) -> str:
@@ -272,6 +272,9 @@ PAYMENT_SENDERS = (
     "phonepe.com",
     "upi.org",
     "npci.org.in",
+    "trans.alerts@fampay.in",
+    "transactions@fampay.in",
+    "noreply@phonepe.com",
 )
 
 CREDIT_KEYWORDS = (
@@ -288,6 +291,7 @@ CREDIT_KEYWORDS = (
     "money added",
     "payment of",
     "received a payment",
+    "deposit",
 )
 
 UTR_RE = re.compile(r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?)[:\s\-/]+([A-Za-z0-9]{8,})", re.I)
@@ -366,11 +370,19 @@ def _decode_header_str(raw: Optional[str]) -> str:
     return "".join(out)
 
 
+PLAIN_AMOUNT_RE = re.compile(r"\b([0-9]+(?:[,.][0-9]{1,2})?)\b")
+
 def _amount_matches(text: str, expected: float) -> bool:
     """True if text contains the expected amount (with rupees-or-paise tolerance)."""
+    # 1. Try with prefixes first (safer)
     found = AMOUNT_RE.findall(text)
+    # 2. Try plain numbers if no prefixed amounts found
+    if not found:
+        found = PLAIN_AMOUNT_RE.findall(text)
+    
     if not found:
         return False
+    
     targets = {f"{expected:.2f}", f"{expected:.0f}", f"{int(expected)}"}
     for raw in found:
         norm = raw.replace(",", "")
@@ -658,7 +670,7 @@ async def generate_qr(request: web.Request) -> web.Response:
           admin is reused.
     """
     token = _bearer_token(request)
-    sess = _get_session(token)
+    sess = await _get_session(token)
     if not sess:
         return _err("Invalid or expired session. Please login again.")
 
@@ -694,7 +706,8 @@ async def generate_qr(request: web.Request) -> web.Response:
     payee_name = (body.get("payee_name") or "Hack Store").strip()[:40]
 
     # Persist upi_id back onto the session for re-use
-    sessions_col.update_one(
+    await asyncio.to_thread(
+        sessions_col.update_one,
         {"_id": sess["_id"]},
         {"$set": {"upi_id": upi_id, "payee_name": payee_name}},
     )
@@ -704,7 +717,8 @@ async def generate_qr(request: web.Request) -> web.Response:
     _qr_cache[order_id] = png
 
     expires_at = time.time() + QR_TTL_SECONDS
-    orders_col.update_one(
+    await asyncio.to_thread(
+        orders_col.update_one,
         {"order_id": order_id},
         {"$set": {
             "order_id": order_id,
@@ -754,7 +768,7 @@ async def verify_payment(request: web.Request) -> web.Response:
     body: {admin_id, order_id}
     """
     token = _bearer_token(request)
-    sess = _get_session(token)
+    sess = await _get_session(token)
     if not sess:
         return _err("Invalid or expired session. Please login again.")
 
@@ -767,7 +781,7 @@ async def verify_payment(request: web.Request) -> web.Response:
     if not order_id:
         return _err("order_id is required.")
 
-    order = orders_col.find_one({"order_id": order_id, "admin_id": sess["admin_id"]})
+    order = await asyncio.to_thread(orders_col.find_one, {"order_id": order_id, "admin_id": sess["admin_id"]})
     if not order:
         return _err("Order not found.")
 
@@ -791,16 +805,20 @@ async def verify_payment(request: web.Request) -> web.Response:
 
     # Anti-replay: collect every UTR / Txn already used by this admin's
     # other PAID orders, and refuse to credit them again.
-    used_utrs: set = set()
-    for prev in orders_col.find(
-        {"admin_id": sess["admin_id"], "status": "PAID",
-         "order_id": {"$ne": order_id}},
-        {"utr": 1, "transaction_id": 1, "_id": 0},
-    ):
-        if prev.get("utr"):
-            used_utrs.add(str(prev["utr"]).strip())
-        if prev.get("transaction_id"):
-            used_utrs.add(str(prev["transaction_id"]).strip())
+    def _collect_utrs():
+        u = set()
+        for prev in orders_col.find(
+            {"admin_id": sess["admin_id"], "status": "PAID",
+             "order_id": {"$ne": order_id}},
+            {"utr": 1, "transaction_id": 1, "_id": 0},
+        ):
+            if prev.get("utr"):
+                u.add(str(prev["utr"]).strip())
+            if prev.get("transaction_id"):
+                u.add(str(prev["transaction_id"]).strip())
+        return u
+
+    used_utrs = await asyncio.to_thread(_collect_utrs)
 
     loop = asyncio.get_running_loop()
     match = await loop.run_in_executor(
@@ -827,7 +845,8 @@ async def verify_payment(request: web.Request) -> web.Response:
     # Final defence — even if the IMAP scanner missed it, the unique
     # sparse index on `utr` will reject a duplicate write below.
     try:
-        orders_col.update_one(
+        await asyncio.to_thread(
+            orders_col.update_one,
             {"_id": order["_id"]},
             {"$set": {
                 "status": "PAID",
