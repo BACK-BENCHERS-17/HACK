@@ -589,6 +589,19 @@ def pagination_kb(current_page: int, total_pages: int, prefix: str, back_cb: str
     return buttons
 
 
+async def notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Helper to broadcast notifications to all configured ADMIN_IDS."""
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=text,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.warning(f"Failed to notify admin {admin_id}: {e}")
+
+
 async def safe_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
                          text: str, reply_markup, **kwargs):
     query = update.callback_query
@@ -922,25 +935,15 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     user_obj = await db.get_user(user_id)
                     uname = (user_obj.get("username") or "").lstrip("@")
                     fname = user_obj.get("first_name") or ""
-                    for admin in ADMIN_IDS:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=admin,
-                                text=(
-                                    f"<blockquote><b>{ce('siren')} UTR REPLAY BLOCKED</b></blockquote>\n"
-                                    f"<b>User:</b> <code>{user_id}</code> "
-                                    f"({fname} @{uname})\n"
-                                    f"<b>Order:</b> <code>{order_id}</code>\n"
-                                    f"<b>Tried UTR:</b> <code>{utr}</code>\n"
-                                    f"<b>Txn:</b> <code>{txn_id}</code>\n"
-                                    f"<b>Sender:</b> {sender_name}\n"
-                                    f"<i>This UTR was already used by another "
-                                    f"order. No key was delivered.</i>"
-                                ),
-                                parse_mode=ParseMode.HTML,
-                            )
-                        except Exception:
-                            pass
+                    await notify_admins(context, (
+                        f"<blockquote><b>{ce('siren')} UTR REPLAY BLOCKED</b></blockquote>\n"
+                        f"<b>User:</b> <code>{user_id}</code> ({fname} @{uname})\n"
+                        f"<b>Order:</b> <code>{order_id}</code>\n"
+                        f"<b>Tried UTR:</b> <code>{utr}</code>\n"
+                        f"<b>Txn:</b> <code>{txn_id}</code>\n"
+                        f"<b>Sender:</b> {sender_name}\n"
+                        f"<i>This UTR was already used by another order. No key was delivered.</i>"
+                    ))
                     return
 
                 # Deliver key automatically
@@ -980,32 +983,23 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     fname = user_obj.get("first_name") or ""
                     plan_obj = await db.get_plan(req["plan_id"]) or {}
                     expected_amount = plan_obj.get("price", paid_amount)
-                    for admin in ADMIN_IDS:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=admin,
-                                text=(
-                                    f"<blockquote><b>{ce('success')} AUTO PAYMENT SUCCESS — KEY DELIVERED</b></blockquote>\n"
-                                    f"{get_line(12)}\n"
-                                    f"<b>{ce('user')} User:</b> <code>{user_id}</code> "
-                                    f"({fname} @{uname})\n"
-                                    f"<b>{ce('card')} Order:</b> <code>{order_id}</code>\n"
-                                    f"<b>{ce('money')} Amount:</b> ₹{expected_amount}\n"
-                                    f"<b>{ce('bag')} Product:</b> {info['product']} — {info['duration']}\n"
-                                    f"{get_line(12)}\n"
-                                    f"<b>UTR:</b> <code>{utr}</code>\n"
-                                    f"<b>Txn ID:</b> <code>{txn_id}</code>\n"
-                                    f"<b>Sender:</b> {sender_name}\n"
-                                    f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
-                                    f"<b>Payment Time:</b> {payment_time}\n"
-                                    f"{get_line(12)}\n"
-                                    f"<b>{ce('key')} Delivered Key:</b>\n<code>{info['key']}</code>\n"
-                                    f"<b>{ce('time')} Expiry:</b> {info['expiry'][:10]}"
-                                ),
-                                parse_mode=ParseMode.HTML,
-                            )
-                        except Exception:
-                            pass
+                    await notify_admins(context, (
+                        f"<blockquote><b>{ce('success')} AUTO PAYMENT SUCCESS — KEY DELIVERED</b></blockquote>\n"
+                        f"{get_line(12)}\n"
+                        f"<b>{ce('user')} User:</b> <code>{user_id}</code> ({fname} @{uname})\n"
+                        f"<b>{ce('card')} Order:</b> <code>{order_id}</code>\n"
+                        f"<b>{ce('money')} Amount:</b> ₹{expected_amount}\n"
+                        f"<b>{ce('bag')} Product:</b> {info['product']} — {info['duration']}\n"
+                        f"{get_line(12)}\n"
+                        f"<b>UTR:</b> <code>{utr}</code>\n"
+                        f"<b>Txn ID:</b> <code>{txn_id}</code>\n"
+                        f"<b>Sender:</b> {sender_name}\n"
+                        f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
+                        f"<b>Payment Time:</b> {payment_time}\n"
+                        f"{get_line(12)}\n"
+                        f"<b>{ce('key')} Delivered Key:</b>\n<code>{info['key']}</code>\n"
+                        f"<b>{ce('time')} Expiry:</b> {info['expiry'][:10]}"
+                    ))
                 else:
                     # Payment verified but key delivery failed (out of stock etc.)
                     await db.update_fund_request_by_order(
@@ -1023,30 +1017,20 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     user_obj = await db.get_user(user_id)
                     uname = (user_obj.get("username") or "").lstrip("@")
                     fname = user_obj.get("first_name") or ""
-                    for admin in ADMIN_IDS:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=admin,
-                                text=(
-                                    f"<blockquote><b>{ce('siren')} PAYMENT RECEIVED — DELIVERY FAILED</b></blockquote>\n"
-                                    f"<b>Reason:</b> {msg}\n"
-                                    f"{get_line(12)}\n"
-                                    f"<b>User:</b> <code>{user_id}</code> "
-                                    f"({fname} @{uname})\n"
-                                    f"<b>Order:</b> <code>{order_id}</code>\n"
-                                    f"<b>Amount:</b> ₹{paid_amount}\n"
-                                    f"<b>UTR:</b> <code>{utr}</code>\n"
-                                    f"<b>Txn:</b> <code>{txn_id}</code>\n"
-                                    f"<b>Sender:</b> {sender_name}\n"
-                                    f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
-                                    f"<b>Time:</b> {payment_time}\n"
-                                    f"<i>Please refund or top-up stock and "
-                                    f"deliver manually.</i>"
-                                ),
-                                parse_mode=ParseMode.HTML,
-                            )
-                        except Exception:
-                            pass
+                    await notify_admins(context, (
+                        f"<blockquote><b>{ce('siren')} PAYMENT RECEIVED — DELIVERY FAILED</b></blockquote>\n"
+                        f"<b>Reason:</b> {msg}\n"
+                        f"{get_line(12)}\n"
+                        f"<b>User:</b> <code>{user_id}</code> ({fname} @{uname})\n"
+                        f"<b>Order:</b> <code>{order_id}</code>\n"
+                        f"<b>Amount:</b> ₹{paid_amount}\n"
+                        f"<b>UTR:</b> <code>{utr}</code>\n"
+                        f"<b>Txn:</b> <code>{txn_id}</code>\n"
+                        f"<b>Sender:</b> {sender_name}\n"
+                        f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
+                        f"<b>Time:</b> {payment_time}\n"
+                        f"<i>Please refund or top-up stock and deliver manually.</i>"
+                    ))
             elif "already been used" in (result.get("message") or "").lower():
                 # Service-side replay rejection
                 await safe_edit_text(
@@ -1347,17 +1331,16 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 await safe_edit_text(update, context, text, main_menu_kb())
                 
                 # Notify Admins
-                for admin in ADMIN_IDS:
-                    try:
-                        await context.bot.send_message(
-                            admin,
-                            f"<blockquote><b>{ce('money')} NEW WALLET PURCHASE</b></blockquote>\n"
-                            f"User: <code>{user_id}</code>\n"
-                            f"Product: {delivery_data['product']} ({delivery_data['duration']})\n"
-                            f"Amount: ₹{price/100:.2f}",
-                            parse_mode=ParseMode.HTML
-                        )
-                    except: pass
+                user_obj = await db.get_user(user_id)
+                uname = (user_obj.get("username") or "").lstrip("@")
+                fname = user_obj.get("first_name") or ""
+                await notify_admins(context, (
+                    f"<blockquote><b>{ce('money')} NEW WALLET PURCHASE</b></blockquote>\n"
+                    f"<b>{ce('user')} User:</b> <code>{user_id}</code> ({fname} @{uname})\n"
+                    f"<b>{ce('bag')} Product:</b> {delivery_data['product']} ({delivery_data['duration']})\n"
+                    f"<b>{ce('money')} Amount:</b> ₹{price/100:.2f}\n"
+                    f"<b>{ce('key')} Key Delivered:</b> <code>{delivery_data['key']}</code>"
+                ))
             else:
                 # Refund balance if key delivery fails
                 await db.update_balance(user_id, int(price))
@@ -2256,6 +2239,16 @@ async def receive_user_promo(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"₹{amount/100:.2f} has been added to your wallet.",
             reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML,
         )
+        # Notify Admins
+        user_obj = await db.get_user(user_id)
+        uname = (user_obj.get("username") or "").lstrip("@")
+        fname = user_obj.get("first_name") or ""
+        await notify_admins(context, (
+            f"<blockquote><b>{ce('gift')} PROMO CODE REDEEMED</b></blockquote>\n"
+            f"<b>User:</b> <code>{user_id}</code> ({fname} @{uname})\n"
+            f"<b>Code:</b> <code>{code}</code>\n"
+            f"<b>Reward:</b> ₹{amount/100:.2f}"
+        ))
     else:
         await update.message.reply_text(
             f"<blockquote>{ce('fail')} <b>{msg}</b></blockquote>",
