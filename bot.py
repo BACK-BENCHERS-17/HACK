@@ -2258,7 +2258,9 @@ async def prompt_add_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
         update, context,
-        "<blockquote><b>Send the User ID of the new staff member:</b></blockquote>",
+        f"<blockquote><b>{ce('admin')} ADD NEW STAFF MEMBER</b></blockquote>\n\n"
+        f"Send the <b>User ID</b> or <b>@Username</b> of the person you want to make a staff member.\n\n"
+        f"<i>Staff can only broadcast and manage tickets.</i>",
         cancel_kb(),
     )
     return WAIT_FOR_ADD_STAFF
@@ -2266,18 +2268,30 @@ async def prompt_add_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @staff_required
 async def receive_add_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        uid = int(update.message.text.strip())
-        await db.add_staff(uid)
-        await db.log_admin_action(update.effective_user.id, "Add Staff", f"UID: {uid}")
+    query_str = update.message.text.strip()
+    user = await db.find_user_by_id_or_username(query_str)
+    
+    if not user:
         await update.message.reply_text(
-            f"<blockquote>{ce('success')} <b>User {uid} added as Staff.</b></blockquote>",
-            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
+            f"<blockquote>{ce('fail')} <b>User not found in database!</b></blockquote>\n\n"
+            f"Please ensure the user has started the bot and is verified.",
+            reply_markup=cancel_kb(), parse_mode=ParseMode.HTML
         )
-        return ConversationHandler.END
-    except Exception:
-        await update.message.reply_text("Invalid ID.", reply_markup=cancel_kb())
         return WAIT_FOR_ADD_STAFF
+
+    uid = user["_id"]
+    name = user.get("first_name", "User")
+    
+    await db.add_staff(uid)
+    await db.log_admin_action(update.effective_user.id, "Add Staff", f"UID: {uid} ({name})")
+    await update.message.reply_text(
+        f"<blockquote>{ce('success')} <b>Staff Member Added!</b></blockquote>\n\n"
+        f"<b>Name:</b> {name}\n"
+        f"<b>ID:</b> <code>{uid}</code>\n\n"
+        f"This user can now access restricted admin features.",
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
+    )
+    return ConversationHandler.END
 
 
 @staff_required
@@ -2285,7 +2299,8 @@ async def prompt_rem_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
         update, context,
-        "<blockquote><b>Send the User ID of the staff member to remove:</b></blockquote>",
+        f"<blockquote><b>{ce('admin')} REMOVE STAFF MEMBER</b></blockquote>\n\n"
+        f"Send the <b>User ID</b> or <b>@Username</b> of the person you want to remove from staff.",
         cancel_kb(),
     )
     return WAIT_FOR_REM_STAFF
@@ -2293,18 +2308,39 @@ async def prompt_rem_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @staff_required
 async def receive_rem_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        uid = int(update.message.text.strip())
-        await db.remove_staff(uid)
-        await db.log_admin_action(update.effective_user.id, "Remove Staff", f"UID: {uid}")
+    query_str = update.message.text.strip()
+    user = await db.find_user_by_id_or_username(query_str)
+
+    if not user:
+        # Fallback to direct ID removal if user not in DB anymore
+        if query_str.isdigit():
+            uid = int(query_str)
+            await db.remove_staff(uid)
+            await db.log_admin_action(update.effective_user.id, "Remove Staff", f"UID: {uid}")
+            await update.message.reply_text(
+                f"<blockquote>{ce('success')} <b>Staff ID {uid} removed.</b></blockquote>",
+                reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
+            )
+            return ConversationHandler.END
+            
         await update.message.reply_text(
-            f"<blockquote>{ce('success')} <b>User {uid} removed from Staff.</b></blockquote>",
-            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
+            f"<blockquote>{ce('fail')} <b>User not found!</b></blockquote>",
+            reply_markup=cancel_kb(), parse_mode=ParseMode.HTML
         )
-        return ConversationHandler.END
-    except Exception:
-        await update.message.reply_text("Invalid ID.", reply_markup=cancel_kb())
         return WAIT_FOR_REM_STAFF
+
+    uid = user["_id"]
+    name = user.get("first_name", "User")
+    
+    await db.remove_staff(uid)
+    await db.log_admin_action(update.effective_user.id, "Remove Staff", f"UID: {uid} ({name})")
+    await update.message.reply_text(
+        f"<blockquote>{ce('success')} <b>Staff Member Removed!</b></blockquote>\n\n"
+        f"<b>Name:</b> {name}\n"
+        f"<b>ID:</b> <code>{uid}</code>",
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
+    )
+    return ConversationHandler.END
 
 
 # ── User conversations ─────────────────────────────────────────────────────────
@@ -2916,12 +2952,20 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_forwarded = bool(msg.forward_date or msg.forward_from or msg.forward_from_chat or getattr(msg, 'forward_origin', None))
             
             if is_forwarded:
-                # Use forward_message to preserve the original source
-                await context.bot.forward_message(
-                    chat_id=uid,
-                    from_chat_id=update.effective_chat.id,
-                    message_id=update.message.message_id
-                )
+                try:
+                    # Try to preserve "Forwarded from" tag
+                    await context.bot.forward_message(
+                        chat_id=uid,
+                        from_chat_id=update.effective_chat.id,
+                        message_id=update.message.message_id
+                    )
+                except Exception:
+                    # Fallback to copy if forwarding is restricted by source privacy
+                    await context.bot.copy_message(
+                        chat_id=uid,
+                        from_chat_id=update.effective_chat.id,
+                        message_id=update.message.message_id
+                    )
             else:
                 # Use copy_message for a clean direct broadcast
                 await context.bot.copy_message(
@@ -2930,7 +2974,8 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id=update.message.message_id
                 )
             sent += 1
-        except Exception:
+        except Exception as e:
+            logger.error(f"Broadcast failed for user {uid}: {e}")
             failed += 1
         
         # Update progress every 50 users or at the end
