@@ -134,13 +134,13 @@ def ce(name: str) -> str:
     if name in EMOJIS:
         fallback, em_id = EMOJIS[name]
         return f'<tg-emoji emoji-id="{em_id}">{fallback}</tg-emoji>'
-    return "🔹"
+    return "✨"
 
 
 def ce_button(name: str) -> str:
     if name in EMOJIS:
         return EMOJIS[name][0]
-    return "🔹"
+    return "✨"
 
 
 def get_line(n: int = 12) -> str:
@@ -468,7 +468,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<blockquote><b>{ce('siren')} NEW VERIFIED USER {ce('siren')}</b></blockquote>\n\n"
             f"{ce('name_icon')} <b>Name:</b> <a href='tg://user?id={user_id}'>{first_name}</a>\n"
             f"{ce('link')} <b>Username:</b> {username_text}\n"
-            f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
+            f"{ce('memo')} <b>User ID:</b> <code>{user_id}</code>\n"
             f"{ce('contact')} <b>Phone:</b> <code>{phone_number}</code>\n"
             f"{get_line(12)}"
         )
@@ -1114,7 +1114,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             bot_info = await context.bot.get_me()
             ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
             share_msg = (
-                f"🔥 Join the Ultimate Hack Store! Get premium mods and scripts instantly. "
+                f"{ce('fire')} Join the Ultimate Hack Store! Get premium mods and scripts instantly. "
                 f"Use my link to start: {ref_link}"
             )
             share_url = f"https://t.me/share/url?url={ref_link}&text={quote(share_msg)}"
@@ -1166,9 +1166,9 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             tos = await db.get_setting("tos_text")
             text = (
                 f"<blockquote><b>{ce('books')} FAQ &amp; TERMS OF SERVICE</b></blockquote>\n\n"
-                f"<b>🔹 FAQ:</b>\n<i>{faq}</i>\n\n"
+                f"<b>{ce('sparkle')} FAQ:</b>\n<i>{faq}</i>\n\n"
                 f"{get_line(12)}\n"
-                f"<b>🔹 TERMS OF SERVICE:</b>\n<i>{tos}</i>\n\n"
+                f"<b>{ce('sparkle')} TERMS OF SERVICE:</b>\n<i>{tos}</i>\n\n"
                 f"<i>By using this bot, you agree to these terms.</i>"
             )
             buttons = [
@@ -1233,9 +1233,9 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             text = f"<blockquote><b>{ce('key')} YOUR PURCHASE HISTORY {ce('star')}</b></blockquote>\n\n"
             for k in keys:
                 text += (
-                    f"🎮 <b>{k['name']}</b> ({k['duration']})\n"
+                    f"{ce('game')} <b>{k['name']}</b> ({k['duration']})\n"
                     f"<code>{k['key_value']}</code>\n"
-                    f"⏳ <b>Expiry:</b> {k['expiry_date'][:10]}\n"
+                    f"{ce('time')} <b>Expiry:</b> {k['expiry_date'][:10]}\n"
                     f"{get_line(10)}\n"
                 )
             total_pages = max(1, math.ceil(total_keys / limit))
@@ -1258,7 +1258,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             for prod_name, plans in summary.items():
                 text += f"<b>{ce('game')} {prod_name}</b>\n"
                 for pl in plans:
-                    text += f"  ├ <b>{pl['duration']}: {pl['count']} keys</b>\n"
+                    text += f"  ├ {ce('key')} <b>{pl['duration']}: {pl['count']} keys</b>\n"
                 text += "\n"
             buttons = [
                 [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary")],
@@ -2768,27 +2768,60 @@ async def prompt_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
         update, context,
-        f"<blockquote><b>{ce('broadcast')} Send the message you want to broadcast:</b></blockquote>",
+        f"<blockquote><b>{ce('broadcast')} Send any message to broadcast (Text, Photo, Video, Sticker, GIF, etc.):</b></blockquote>",
         cancel_kb(),
     )
     return WAIT_FOR_BROADCAST
 
 
 async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.text
     user_ids = await db.get_all_verified_user_ids()
+    total = len(user_ids)
+    if total == 0:
+        await update.message.reply_text(f"{ce('fail')} No verified users to broadcast to.", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+
     sent, failed = 0, 0
-    await update.message.reply_text("Broadcast started… (This may take a moment).")
-    for uid in user_ids:
+    status_msg = await update.message.reply_text(f"{ce('broadcast')} <b>Broadcast started to {total} users...</b>", parse_mode=ParseMode.HTML)
+    
+    start_time = time.time()
+    
+    for i, uid in enumerate(user_ids):
         try:
-            await context.bot.send_message(uid, msg, parse_mode=ParseMode.HTML)
+            # Jugad: Use copy_message to preserve premium emojis and all media types
+            await context.bot.copy_message(
+                chat_id=uid,
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id
+            )
             sent += 1
-            await asyncio.sleep(0.05)
         except Exception:
             failed += 1
+        
+        # Update progress every 50 users or at the end
+        if (i + 1) % 50 == 0 or (i + 1) == total:
+            elapsed = time.time() - start_time
+            try:
+                await status_msg.edit_text(
+                    f"{ce('broadcast')} <b>Broadcast in progress...</b>\n\n"
+                    f"{ce('success')} <b>Sent:</b> {sent}\n"
+                    f"{ce('fail')} <b>Failed:</b> {failed}\n"
+                    f"{ce('stats')} <b>Progress:</b> {i+1}/{total}\n"
+                    f"{ce('time')} <b>Elapsed:</b> {int(elapsed)}s",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+        
+        # Rate limiting: ~20 messages per second
+        await asyncio.sleep(0.05)
+
     await db.log_admin_action(update.effective_user.id, "Broadcast", f"Sent: {sent}, Failed: {failed}")
-    await update.message.reply_text(
-        f"<blockquote>{ce('success')} <b>Broadcast Finished.</b>\nSent: {sent}\nFailed: {failed}</blockquote>",
+    await status_msg.edit_text(
+        f"<blockquote>{ce('success')} <b>Broadcast Finished.</b>\n\n"
+        f"{ce('success')} <b>Successfully Sent:</b> {sent}\n"
+        f"{ce('fail')} <b>Failed:</b> {failed}\n"
+        f"{ce('user')} <b>Total Users:</b> {total}</blockquote>",
         reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
@@ -3044,7 +3077,7 @@ def main():
             WAIT_FOR_SVC_EMAIL:  [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_svc_email)],
             WAIT_FOR_SVC_OTP:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_svc_otp)],
             WAIT_FOR_SVC_URL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_svc_url)],
-            WAIT_FOR_BROADCAST:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_broadcast)],
+            WAIT_FOR_BROADCAST:       [MessageHandler(~filters.COMMAND, receive_broadcast)],
             WAIT_FOR_SETTING_UPI:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_upi)],
             WAIT_FOR_SETTING_QR:      [MessageHandler(filters.PHOTO, receive_set_qr)],
             WAIT_FOR_SETTING_SUP:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_sup)],
@@ -3096,6 +3129,37 @@ def main():
             WAIT_FOR_USER_PROMO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_user_promo)],
             WAIT_FOR_ADD_FUND_AMT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_fund_amt)],
         },
+        fallbacks=[CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
+        per_message=False,
+        allow_reentry=True,
+    )
+    app.add_handler(user_conv)
+
+    # ── Callback routers ──────────────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(
+        handle_user_callbacks,
+        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_|add_f_|kp_)",
+    ))
+
+    app.add_handler(CallbackQueryHandler(
+        handle_admin_callbacks,
+        pattern="^(admin_|adm_)",
+    ))
+
+    logger.info("🔥 Bot is starting (MongoDB + Render + Self-hosted Payment Service) 🔥")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        logger.error("FATAL ERROR DURING STARTUP:")
+        logger.error(traceback.format_exc())
+        # Force flush logs
+        import sys
+        sys.stderr.flush()
+        sys.stdout.flush()        },
         fallbacks=[CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
         per_message=False,
         allow_reentry=True,
