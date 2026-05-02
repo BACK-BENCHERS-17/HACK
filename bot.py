@@ -2911,12 +2911,24 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     for i, uid in enumerate(user_ids):
         try:
-            # Jugad: Use copy_message to preserve premium emojis and all media types
-            await context.bot.copy_message(
-                chat_id=uid,
-                from_chat_id=update.effective_chat.id,
-                message_id=update.message.message_id
-            )
+            # Check if the message is a forward
+            msg = update.message
+            is_forwarded = bool(msg.forward_date or msg.forward_from or msg.forward_from_chat or getattr(msg, 'forward_origin', None))
+            
+            if is_forwarded:
+                # Use forward_message to preserve the original source
+                await context.bot.forward_message(
+                    chat_id=uid,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id
+                )
+            else:
+                # Use copy_message for a clean direct broadcast
+                await context.bot.copy_message(
+                    chat_id=uid,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id
+                )
             sent += 1
         except Exception:
             failed += 1
@@ -3208,6 +3220,8 @@ def main():
             WAIT_FOR_SETTING_SUP:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_sup)],
             WAIT_FOR_SETTING_MSG:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_msg)],
             WAIT_FOR_PROD_LINK:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_dl_link)],
+            WAIT_FOR_ADD_STAFF:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_staff)],
+            WAIT_FOR_REM_STAFF:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_rem_staff)],
             WAIT_FOR_BAN_USER:        [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ban)],
             WAIT_FOR_UNBAN_USER:      [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_unban)],
             WAIT_FOR_MANUAL_BAL_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_bal_user)],
