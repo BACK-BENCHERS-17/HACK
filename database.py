@@ -180,6 +180,26 @@ class DatabaseManager:
         return await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
+    # Staff / Sub-Admins
+    # ------------------------------------------------------------------
+    async def add_staff(self, user_id: int):
+        await asyncio.to_thread(self.db.users.update_one,
+                                {"_id": user_id}, {"$set": {"is_staff": 1}})
+
+    async def remove_staff(self, user_id: int):
+        await asyncio.to_thread(self.db.users.update_one,
+                                {"_id": user_id}, {"$set": {"is_staff": 0}})
+
+    async def is_staff(self, user_id: int) -> bool:
+        def _op():
+            user = self.db.users.find_one({"_id": user_id}, {"is_staff": 1})
+            return bool(user and user.get("is_staff", 0))
+        return await asyncio.to_thread(_op)
+
+    async def get_all_staff(self) -> List[dict]:
+        return await asyncio.to_thread(lambda: list(self.db.users.find({"is_staff": 1})))
+
+    # ------------------------------------------------------------------
     # Resellers
     # ------------------------------------------------------------------
     async def set_reseller(self, user_id: int, days: int, discount: float):

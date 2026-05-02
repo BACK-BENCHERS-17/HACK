@@ -166,7 +166,9 @@ def get_line(n: int = 12) -> str:
     WAIT_FOR_RESELLER_USER, WAIT_FOR_RESELLER_DAYS, WAIT_FOR_RESELLER_DISCOUNT,
     # NEW: Add fund state
     WAIT_FOR_ADD_FUND_AMT,
-) = range(35)
+    # NEW: Staff states
+    WAIT_FOR_ADD_STAFF, WAIT_FOR_REM_STAFF,
+) = range(37)
 
 
 # ==============================================================================
@@ -395,6 +397,7 @@ def verification_required(func):
                 await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
             return
 
+        # Super Admins bypass everything
         if user_id in ADMIN_IDS:
             return await func(update, context, *args, **kwargs)
 
@@ -412,6 +415,25 @@ def verification_required(func):
             )
             return
         return await func(update, context, *args, **kwargs)
+    return wrapper
+
+
+def staff_required(func):
+    """Decorator to restrict access to Admins or Staff."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if user_id in ADMIN_IDS:
+            return await func(update, context, *args, **kwargs)
+        
+        if await db.is_staff(user_id):
+            return await func(update, context, *args, **kwargs)
+            
+        await update.effective_message.reply_text(
+            f"<blockquote><b>{ce('angry')} ACCESS DENIED!</b></blockquote>\n\n"
+            f"<i>This command is only for Staff or Admins.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
     return wrapper
 
 
@@ -557,22 +579,48 @@ def cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("Cancel Process", callback_data="cancel_conv", icon_custom_emoji_id=EMOJIS["fail"][1], style="danger")]])
 
 
-def admin_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Dashboard", callback_data="admin_stats", icon_custom_emoji_id=EMOJIS["stats"][1], style="primary")],
-        [InlineKeyboardButton("Products", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["bag"][1], style="primary"),
-         InlineKeyboardButton("Keys", callback_data="admin_keys", icon_custom_emoji_id=EMOJIS["key"][1], style="primary")],
-        [InlineKeyboardButton("Users", callback_data="admin_users", icon_custom_emoji_id=EMOJIS["user"][1], style="primary"),
-         InlineKeyboardButton("Pending Payments", callback_data="admin_pending_payments", icon_custom_emoji_id=EMOJIS["pending"][1], style="primary")],
-        [InlineKeyboardButton("Broadcast", callback_data="admin_broadcast", icon_custom_emoji_id=EMOJIS["broadcast"][1], style="primary"),
-         InlineKeyboardButton("Resellers", callback_data="admin_resellers", icon_custom_emoji_id=EMOJIS["shield"][1], style="primary")],
-        [InlineKeyboardButton("Tickets", callback_data="admin_tickets", icon_custom_emoji_id=EMOJIS["chat"][1], style="primary"),
-         InlineKeyboardButton("Settings", callback_data="admin_settings", icon_custom_emoji_id=EMOJIS["settings"][1], style="primary")],
-        [InlineKeyboardButton("Maintenance", callback_data="adm_maintenance", icon_custom_emoji_id=EMOJIS["tools"][1], style="primary")],
-        [InlineKeyboardButton("UPI Session", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["session"][1], style="primary"),
-         InlineKeyboardButton("Backup DB", callback_data="adm_export_db", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary")],
-        [InlineKeyboardButton("Exit Admin", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+async def admin_menu_kb(user_id: int) -> InlineKeyboardMarkup:
+    is_super = user_id in ADMIN_IDS
+    
+    buttons = []
+    
+    # Dashboard / Stats
+    buttons.append([InlineKeyboardButton("Dashboard", callback_data="admin_stats", icon_custom_emoji_id=EMOJIS["stats"][1], style="primary")])
+    
+    if is_super:
+        # Full Admin Options
+        buttons.append([
+            InlineKeyboardButton("Products", callback_data="admin_products", icon_custom_emoji_id=EMOJIS["bag"][1], style="primary"),
+            InlineKeyboardButton("Keys", callback_data="admin_keys", icon_custom_emoji_id=EMOJIS["key"][1], style="primary")
+        ])
+        buttons.append([
+            InlineKeyboardButton("Users", callback_data="admin_users", icon_custom_emoji_id=EMOJIS["user"][1], style="primary"),
+            InlineKeyboardButton("Pending Payments", callback_data="admin_pending_payments", icon_custom_emoji_id=EMOJIS["pending"][1], style="primary")
+        ])
+    
+    # Staff/Admin Broadcast
+    buttons.append([
+        InlineKeyboardButton("Broadcast", callback_data="admin_broadcast", icon_custom_emoji_id=EMOJIS["broadcast"][1], style="primary"),
+        InlineKeyboardButton("Resellers", callback_data="admin_resellers", icon_custom_emoji_id=EMOJIS["shield"][1], style="primary") if is_super else InlineKeyboardButton("Tickets", callback_data="admin_tickets", icon_custom_emoji_id=EMOJIS["chat"][1], style="primary")
     ])
+
+    if is_super:
+        buttons.append([
+            InlineKeyboardButton("Tickets", callback_data="admin_tickets", icon_custom_emoji_id=EMOJIS["chat"][1], style="primary"),
+            InlineKeyboardButton("Settings", callback_data="admin_settings", icon_custom_emoji_id=EMOJIS["settings"][1], style="primary")
+        ])
+        buttons.append([
+            InlineKeyboardButton("Staff Mgmt", callback_data="admin_staff_list", icon_custom_emoji_id=EMOJIS["admin"][1], style="primary"),
+            InlineKeyboardButton("Maintenance", callback_data="adm_maintenance", icon_custom_emoji_id=EMOJIS["tools"][1], style="primary")
+        ])
+        buttons.append([
+            InlineKeyboardButton("UPI Session", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["session"][1], style="primary"),
+            InlineKeyboardButton("Backup DB", callback_data="adm_export_db", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary")
+        ])
+    
+    buttons.append([InlineKeyboardButton("Exit Admin", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
+    
+    return InlineKeyboardMarkup(buttons)
 
 
 def pagination_kb(current_page: int, total_pages: int, prefix: str, back_cb: str):
@@ -1405,7 +1453,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         f"<blockquote><b>{ce('admin')} ENTERPRISE ADMIN PANEL</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
 
 
@@ -1421,11 +1469,31 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
     try:
         if data == "admin_main":
             await query.answer()
+            kb = await admin_menu_kb(user_id)
             await safe_edit_text(
                 update, context,
                 f"<blockquote><b>{ce('admin')} ENTERPRISE ADMIN PANEL</b></blockquote>",
-                admin_menu_kb(),
+                kb,
             )
+
+        # ── Staff Management ──────────────────────────────────────────────────
+        elif data == "admin_staff_list":
+            await query.answer()
+            staff = await db.get_all_staff()
+            text = f"<blockquote><b>{ce('admin')} STAFF MANAGEMENT</b></blockquote>\n\n"
+            if not staff:
+                text += "<i>No staff members added yet.</i>"
+            else:
+                for s in staff:
+                    uname = f"@{s.get('username')}" if s.get('username') else "N/A"
+                    text += f"• <b>{s.get('first_name')}</b> ({uname})\n  └ ID: <code>{s['_id']}</code>\n"
+            
+            buttons = [
+                [InlineKeyboardButton("ADD STAFF", callback_data="adm_add_staff")],
+                [InlineKeyboardButton("REMOVE STAFF", callback_data="adm_rem_staff")],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")]
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         # ── Dashboard ─────────────────────────────────────────────────────────
         elif data == "admin_stats":
@@ -1967,7 +2035,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 async def cancel_conv_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer("Cancelled.")
     if update.effective_user.id in ADMIN_IDS:
-        await safe_edit_text(update, context, "<blockquote>Process Cancelled.</blockquote>", admin_menu_kb())
+        await safe_edit_text(update, context, "<blockquote>Process Cancelled.</blockquote>", await admin_menu_kb(update.effective_user.id))
     else:
         await safe_edit_text(update, context, "<blockquote>Process Cancelled.</blockquote>", main_menu_kb())
     context.user_data.clear()
@@ -2073,14 +2141,14 @@ async def receive_svc_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"<blockquote>{ce('success')} <b>Payment service login successful!</b></blockquote>\n\n"
             f"<i>Automated UPI payments are now active.</i>",
-            reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
         )
     else:
         err = result.get("message", "Login failed. Check credentials and OTP.")
         await update.message.reply_text(
             f"<blockquote>{ce('fail')} <b>Login Failed:</b> {err}\n\n"
             f"Please try again from Admin Panel → UPI Session.</blockquote>",
-            reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
         )
 
     return ConversationHandler.END
@@ -2122,7 +2190,7 @@ async def receive_reseller_days(update: Update, context: ContextTypes.DEFAULT_TY
         await db.remove_reseller(uid)
         await db.log_admin_action(update.effective_user.id, "Removed Reseller", f"UID: {uid}")
         await update.message.reply_text(f"<blockquote>{ce('success')} Reseller status removed.</blockquote>", 
-                                       reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML)
+                                       reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML)
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -2152,7 +2220,7 @@ async def receive_reseller_discount(update: Update, context: ContextTypes.DEFAUL
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Reseller Setup Complete!</b></blockquote>\n\n"
         f"User <code>{uid}</code> is now a reseller for {days} days with {discount}% discount.",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -2179,7 +2247,7 @@ async def receive_set_svc_url(update: Update, context: ContextTypes.DEFAULT_TYPE
     await db.log_admin_action(update.effective_user.id, "Changed Microservice URL", url)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Microservice URL Updated!</b>\n\n<code>{url}</code></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2380,7 +2448,7 @@ async def receive_ticket_reply(update: Update, context: ContextTypes.DEFAULT_TYP
     u_id = await db.reply_ticket(t_id, reply)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Reply sent and ticket closed.</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     try:
         await context.bot.send_message(
@@ -2441,7 +2509,7 @@ async def receive_prod_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit_text(
             update, context,
             f"<blockquote>{ce('success')} <b>Product '{name}' Added Successfully!</b></blockquote>",
-            admin_menu_kb(),
+            await admin_menu_kb(update.effective_user.id),
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -2454,7 +2522,7 @@ async def receive_custom_desc(update: Update, context: ContextTypes.DEFAULT_TYPE
     await db.log_admin_action(update.effective_user.id, "Added Product", f"Name: {name}")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Product '{name}' Added Successfully!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -2486,7 +2554,7 @@ async def receive_edit_prod_desc(update: Update, context: ContextTypes.DEFAULT_T
     prod_id = context.user_data.get("editing_prod_id")
     if not prod_id:
         if update.message:
-            await update.message.reply_text("Error: No product in editing state.", reply_markup=admin_menu_kb())
+            await update.message.reply_text("Error: No product in editing state.", reply_markup=await admin_menu_kb(update.effective_user.id))
         return ConversationHandler.END
 
     def _prod_buttons(pid):
@@ -2555,7 +2623,7 @@ async def receive_set_dl_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     await db.log_admin_action(update.effective_user.id, "Changed Download Link", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Download Channel Link Updated!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2605,7 +2673,7 @@ async def receive_plan_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
         buttons.append([InlineKeyboardButton("Back to Product", callback_data=f"adm_prod_{prod_id}", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
     except Exception:
-        await update.message.reply_text("Invalid Price.", reply_markup=admin_menu_kb())
+        await update.message.reply_text("Invalid Price.", reply_markup=await admin_menu_kb(update.effective_user.id))
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -2628,7 +2696,7 @@ async def receive_add_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.log_admin_action(update.effective_user.id, "Added Keys", f"Count: {count}")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Successfully added {count} unique keys!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -2662,7 +2730,7 @@ async def receive_promo_reward(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return WAIT_FOR_PROMO_USES
     except Exception:
-        await update.message.reply_text("Invalid amount.", reply_markup=admin_menu_kb())
+        await update.message.reply_text("Invalid amount.", reply_markup=await admin_menu_kb(update.effective_user.id))
         return ConversationHandler.END
 
 
@@ -2674,15 +2742,15 @@ async def receive_promo_uses(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if await db.create_promo(code, reward, uses):
             await update.message.reply_text(
                 f"<blockquote>{ce('success')} <b>Promo Code <code>{code}</code> Created!</b></blockquote>",
-                reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+                reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
             )
         else:
             await update.message.reply_text(
                 f"<blockquote>{ce('fail')} <b>Code already exists!</b></blockquote>",
-                reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+                reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
             )
     except Exception:
-        await update.message.reply_text("Invalid number.", reply_markup=admin_menu_kb())
+        await update.message.reply_text("Invalid number.", reply_markup=await admin_menu_kb(update.effective_user.id))
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -2701,7 +2769,7 @@ async def receive_edit_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.set_setting("faq_text", update.message.text)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>FAQ Updated Successfully!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2720,7 +2788,7 @@ async def receive_edit_tos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.set_setting("tos_text", update.message.text)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>TOS Updated Successfully!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2739,7 +2807,7 @@ async def receive_howto_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await db.set_setting("how_to_text", update.message.text)
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>How To Use Text Updated Successfully!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2758,7 +2826,7 @@ async def receive_howto_vid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.set_setting("how_to_video", update.message.text.strip())
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>How To Use Video Link Updated Successfully!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2822,7 +2890,7 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{ce('success')} <b>Successfully Sent:</b> {sent}\n"
         f"{ce('fail')} <b>Failed:</b> {failed}\n"
         f"{ce('user')} <b>Total Users:</b> {total}</blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2843,7 +2911,7 @@ async def receive_set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.log_admin_action(update.effective_user.id, "Changed UPI", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>UPI ID Updated!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2866,7 +2934,7 @@ async def receive_set_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.log_admin_action(update.effective_user.id, "Changed QR Image", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>QR Image Updated!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2887,7 +2955,7 @@ async def receive_set_sup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.log_admin_action(update.effective_user.id, "Changed Support User", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Support Username Updated!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2908,7 +2976,7 @@ async def receive_set_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.log_admin_action(update.effective_user.id, "Changed Insult Msg", "Setting Updated")
     await update.message.reply_text(
         f"<blockquote>{ce('success')} <b>Insult Message Updated!</b></blockquote>",
-        reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
 
@@ -2940,7 +3008,7 @@ async def receive_manual_bal_user(update: Update, context: ContextTypes.DEFAULT_
     try:
         uid = int(update.message.text.strip())
         if not await db.get_user(uid):
-            await update.message.reply_text("User not found in DB.", reply_markup=admin_menu_kb())
+            await update.message.reply_text("User not found in DB.", reply_markup=await admin_menu_kb(update.effective_user.id))
             return ConversationHandler.END
         context.user_data["man_bal_uid"] = uid
         await update.message.reply_text(
@@ -2949,7 +3017,7 @@ async def receive_manual_bal_user(update: Update, context: ContextTypes.DEFAULT_
         )
         return WAIT_FOR_MANUAL_BAL_AMT
     except Exception:
-        await update.message.reply_text("Invalid ID.", reply_markup=admin_menu_kb())
+        await update.message.reply_text("Invalid ID.", reply_markup=await admin_menu_kb(update.effective_user.id))
         return ConversationHandler.END
 
 
@@ -2962,7 +3030,7 @@ async def receive_manual_bal_amt(update: Update, context: ContextTypes.DEFAULT_T
         await db.log_admin_action(update.effective_user.id, "Manual Balance Add", f"UID: {uid}, Amt: {amt}")
         await update.message.reply_text(
             f"<blockquote>{ce('success')} <b>Added ₹{amt} to User {uid}.</b></blockquote>",
-            reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
         )
         try:
             await context.bot.send_message(
@@ -2974,7 +3042,7 @@ async def receive_manual_bal_amt(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
     except Exception:
-        await update.message.reply_text("Invalid amount.", reply_markup=admin_menu_kb())
+        await update.message.reply_text("Invalid amount.", reply_markup=await admin_menu_kb(update.effective_user.id))
     return ConversationHandler.END
 
 
@@ -2996,10 +3064,10 @@ async def receive_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.log_admin_action(update.effective_user.id, "Banned User", f"UID: {uid}")
         await update.message.reply_text(
             f"<blockquote>{ce('success')} <b>User <code>{uid}</code> is now BANNED.</b></blockquote>",
-            reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
         )
     except Exception:
-        await update.message.reply_text("Invalid ID.", reply_markup=admin_menu_kb())
+        await update.message.reply_text("Invalid ID.", reply_markup=await admin_menu_kb(update.effective_user.id))
     return ConversationHandler.END
 
 
@@ -3021,10 +3089,10 @@ async def receive_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db.log_admin_action(update.effective_user.id, "Unbanned User", f"UID: {uid}")
         await update.message.reply_text(
             f"<blockquote>{ce('success')} <b>User <code>{uid}</code> is now UNBANNED.</b></blockquote>",
-            reply_markup=admin_menu_kb(), parse_mode=ParseMode.HTML,
+            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
         )
     except Exception:
-        await update.message.reply_text("Invalid ID.", reply_markup=admin_menu_kb())
+        await update.message.reply_text("Invalid ID.", reply_markup=await admin_menu_kb(update.effective_user.id))
     return ConversationHandler.END
 
 
@@ -3046,6 +3114,8 @@ def main():
             CallbackQueryHandler(prompt_set_svc_url, pattern="^adm_set_svc_url$"),
             # Broadcast & Settings
             CallbackQueryHandler(prompt_broadcast, pattern="^admin_broadcast$"),
+            CallbackQueryHandler(prompt_add_staff, pattern="^adm_add_staff$"),
+            CallbackQueryHandler(prompt_rem_staff, pattern="^adm_rem_staff$"),
             CallbackQueryHandler(prompt_set_upi, pattern="^adm_set_upi$"),
             CallbackQueryHandler(prompt_set_qr, pattern="^adm_set_qr$"),
             CallbackQueryHandler(prompt_set_sup, pattern="^adm_set_sup$"),
@@ -3189,5 +3259,68 @@ if __name__ == "__main__":
         logger.error(traceback.format_exc())
         # Force flush logs
         import sys
+        sys.stderr.flush()
+        sys.stdout.flush()CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
+        per_message=False,
+        allow_reentry=True,
+    )
+    app.add_handler(user_conv)
+
+    # ── Callback routers ──────────────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(
+        handle_user_callbacks,
+        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_|add_f_|kp_)",
+    ))
+
+    app.add_handler(CallbackQueryHandler(
+        handle_admin_callbacks,
+        pattern="^(admin_|adm_)",
+    ))
+
+    logger.info("🔥 Bot is starting (MongoDB + Render + Self-hosted Payment Service) 🔥")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        logger.error("FATAL ERROR DURING STARTUP:")
+        logger.error(traceback.format_exc())
+        # Force flush logs
+        import sys
+        sys.stderr.flush()
+        sys.stdout.flush()        },
+        fallbacks=[CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
+        per_message=False,
+        allow_reentry=True,
+    )
+    app.add_handler(user_conv)
+
+    # ── Callback routers ──────────────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(
+        handle_user_callbacks,
+        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_|add_f_|kp_)",
+    ))
+
+    app.add_handler(CallbackQueryHandler(
+        handle_admin_callbacks,
+        pattern="^(admin_|adm_)",
+    ))
+
+    logger.info("🔥 Bot is starting (MongoDB + Render + Self-hosted Payment Service) 🔥")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        logger.error("FATAL ERROR DURING STARTUP:")
+        logger.error(traceback.format_exc())
+        # Force flush logs
+        import sys
+        sys.stderr.flush()
+        sys.stdout.flush() sys
         sys.stderr.flush()
         sys.stdout.flush()
