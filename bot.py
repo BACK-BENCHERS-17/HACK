@@ -1072,6 +1072,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             )
             buttons = [
                 [InlineKeyboardButton("ACCESS DOWNLOAD CHANNEL", url=channel_link, style="primary", icon_custom_emoji_id=EMOJIS["outbox"][1])],
+                [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary")],
                 [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons),
@@ -1084,6 +1085,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             buttons = []
             if vid and vid.startswith("http"):
                 buttons.append([InlineKeyboardButton("Watch Tutorial Video", url=vid, style="primary", icon_custom_emoji_id=EMOJIS["rocket"][1])])
+            
+            buttons.append([InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary")])
             buttons.append([InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons),
                                  link_preview_options=LinkPreviewOptions(is_disabled=True))
@@ -1096,9 +1099,14 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<blockquote><b>{ce('card')} YOUR WALLET BALANCE</b></blockquote>\n\n"
                 f"<b>Available Funds:</b> ₹{bal:.2f}\n"
                 f"{get_line(12)}\n"
-                f"<i>Want to buy something? Select BUY HACK!</i>"
+                f"<i>Ready to get some hacks or need more funds?</i>"
             )
-            await safe_edit_text(update, context, text, back_kb("user_main"))
+            buttons = [
+                [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary"),
+                 InlineKeyboardButton("ADD FUND", callback_data="user_add_funds", icon_custom_emoji_id=EMOJIS["money"][1], style="success")],
+                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data == "user_referral":
             await query.answer()
@@ -1146,7 +1154,11 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             for i, leader in enumerate(leaders):
                 text += f"{medals[i]} <b>{leader['first_name']}</b> ➖ ₹{leader['total_spent']/100:.2f}\n"
             text += f"\n{get_line(12)}\n<i>Buy more to get on the Leaderboard!</i>"
-            await safe_edit_text(update, context, text, back_kb("user_main"))
+            buttons = [
+                [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary")],
+                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data == "user_faq":
             await query.answer()
@@ -1159,7 +1171,11 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<b>🔹 TERMS OF SERVICE:</b>\n<i>{tos}</i>\n\n"
                 f"<i>By using this bot, you agree to these terms.</i>"
             )
-            await safe_edit_text(update, context, text, back_kb("user_main"))
+            buttons = [
+                [InlineKeyboardButton("SUPPORT", callback_data="user_contact", icon_custom_emoji_id=EMOJIS["contact"][1], style="primary")],
+                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data == "user_profile":
             await query.answer()
@@ -1180,7 +1196,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 f"<i>Note: Profile fetches your current Telegram Photo.</i>"
             )
             buttons = [
-                [InlineKeyboardButton("ADD FUND", callback_data="user_add_funds", icon_custom_emoji_id=EMOJIS["money"][1], style="success")],
+                [InlineKeyboardButton("MY KEYS", callback_data="user_my_keys_0", icon_custom_emoji_id=EMOJIS["key"][1], style="primary"),
+                 InlineKeyboardButton("ADD FUND", callback_data="user_add_funds", icon_custom_emoji_id=EMOJIS["money"][1], style="success")],
                 [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             kb = InlineKeyboardMarkup(buttons)
@@ -1223,6 +1240,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 )
             total_pages = max(1, math.ceil(total_keys / limit))
             buttons = pagination_kb(page, total_pages, "user_my_keys", "user_main")
+            # Add Buy Hack to the loop
+            buttons.insert(-1, [InlineKeyboardButton("BUY MORE HACKS", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary")])
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data == "user_stock":
@@ -1241,7 +1260,11 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 for pl in plans:
                     text += f"  ├ <b>{pl['duration']}: {pl['count']} keys</b>\n"
                 text += "\n"
-            await safe_edit_text(update, context, text, back_kb("user_main"))
+            buttons = [
+                [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary")],
+                [InlineKeyboardButton("Back", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data == "user_add_funds":
             await prompt_add_funds(update, context)
