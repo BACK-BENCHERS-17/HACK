@@ -3219,7 +3219,6 @@ def main():
     logger.info("🔥 Bot is starting (MongoDB + Render + Self-hosted Payment Service) 🔥")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
-
 if __name__ == "__main__":
     try:
         main()
@@ -3228,99 +3227,5 @@ if __name__ == "__main__":
         logger.error(traceback.format_exc())
         # Force flush logs
         import sys
-        sys.stderr.flush()
-        sys.stdout.flush()        },
-        fallbacks=[CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
-        per_message=False,
-        allow_reentry=True,
-    )
-    app.add_handler(user_conv)
-
-    # ── Callback routers ──────────────────────────────────────────────────────
-    app.add_handler(CallbackQueryHandler(
-        handle_user_callbacks,
-        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_|add_f_|kp_)",
-    ))
-
-    app.add_handler(CallbackQueryHandler(
-        handle_admin_callbacks,
-        pattern="^(admin_|adm_)",
-    ))
-
-    logger.info("🔥 Bot is starting (MongoDB + Render + Self-hosted Payment Service) 🔥")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.error("FATAL ERROR DURING STARTUP:")
-        logger.error(traceback.format_exc())
-        # Force flush logs
-        import sys
-        sys.stderr.flush()
-        sys.stdout.flush()CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
-        per_message=False,
-        allow_reentry=True,
-    )
-    app.add_handler(user_conv)
-
-    # ── Callback routers ──────────────────────────────────────────────────────
-    app.add_handler(CallbackQueryHandler(
-        handle_user_callbacks,
-        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_|add_f_|kp_)",
-    ))
-
-    app.add_handler(CallbackQueryHandler(
-        handle_admin_callbacks,
-        pattern="^(admin_|adm_)",
-    ))
-
-    logger.info("🔥 Bot is starting (MongoDB + Render + Self-hosted Payment Service) 🔥")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.error("FATAL ERROR DURING STARTUP:")
-        logger.error(traceback.format_exc())
-        # Force flush logs
-        import sys
-        sys.stderr.flush()
-        sys.stdout.flush()        },
-        fallbacks=[CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
-        per_message=False,
-        allow_reentry=True,
-    )
-    app.add_handler(user_conv)
-
-    # ── Callback routers ──────────────────────────────────────────────────────
-    app.add_handler(CallbackQueryHandler(
-        handle_user_callbacks,
-        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_|add_f_|kp_)",
-    ))
-
-    app.add_handler(CallbackQueryHandler(
-        handle_admin_callbacks,
-        pattern="^(admin_|adm_)",
-    ))
-
-    logger.info("🔥 Bot is starting (MongoDB + Render + Self-hosted Payment Service) 🔥")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.error("FATAL ERROR DURING STARTUP:")
-        logger.error(traceback.format_exc())
-        # Force flush logs
-        import sys
-        sys.stderr.flush()
-        sys.stdout.flush() sys
         sys.stderr.flush()
         sys.stdout.flush()
