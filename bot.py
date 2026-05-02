@@ -1444,26 +1444,31 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 # ==============================================================================
 # 9. ADMIN HANDLERS
 # ==============================================================================
-@verification_required
+@staff_required
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        insult_raw = await db.get_setting("unauth_msg")
-        await update.message.reply_text(insult_raw, parse_mode=ParseMode.HTML)
-        return
+    kb = await admin_menu_kb(user_id)
     await update.message.reply_text(
         f"<blockquote><b>{ce('admin')} ENTERPRISE ADMIN PANEL</b></blockquote>",
-        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
+        reply_markup=kb, parse_mode=ParseMode.HTML,
     )
 
 
-@verification_required
+@staff_required
 async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     user_id = query.from_user.id
-    if user_id not in ADMIN_IDS:
-        await query.answer("Access Denied!", show_alert=True)
+    
+    # Super Admin Only actions
+    super_only = [
+        "admin_products", "admin_keys", "admin_users", "admin_pending_payments",
+        "admin_resellers", "admin_settings", "adm_maintenance", "admin_svc_session",
+        "adm_export_db", "admin_staff_list"
+    ]
+    
+    if any(data.startswith(s) for s in super_only) and user_id not in ADMIN_IDS:
+        await query.answer("Super Admin Only!", show_alert=True)
         return
 
     try:
@@ -2922,7 +2927,7 @@ async def receive_howto_vid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-@verification_required
+@staff_required
 async def prompt_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -2933,6 +2938,7 @@ async def prompt_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_FOR_BROADCAST
 
 
+@staff_required
 async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_ids = await db.get_all_verified_user_ids()
     total = len(user_ids)
@@ -2941,6 +2947,7 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     sent, failed = 0, 0
+    last_error = "None"
     status_msg = await update.message.reply_text(f"{ce('broadcast')} <b>Broadcast started to {total} users...</b>", parse_mode=ParseMode.HTML)
     
     start_time = time.time()
@@ -2949,8 +2956,14 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             # Check if the message is a forward
             msg = update.message
-            is_forwarded = bool(msg.forward_date or msg.forward_from or msg.forward_from_chat or getattr(msg, 'forward_origin', None))
+            # Improved forward detection
+            is_forwarded = any([
+                msg.forward_date, msg.forward_from, msg.forward_from_chat, 
+                msg.forward_from_message_id, msg.forward_signature, msg.forward_sender_name,
+                hasattr(msg, 'forward_origin') and msg.forward_origin is not None
+            ])
             
+            success = False
             if is_forwarded:
                 try:
                     # Try to preserve "Forwarded from" tag
@@ -2959,23 +2972,38 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         from_chat_id=update.effective_chat.id,
                         message_id=update.message.message_id
                     )
-                except Exception:
+                    success = True
+                except Exception as e:
                     # Fallback to copy if forwarding is restricted by source privacy
+                    # Or if it's a media type that can't be forwarded easily in this context
+                    try:
+                        await context.bot.copy_message(
+                            chat_id=uid,
+                            from_chat_id=update.effective_chat.id,
+                            message_id=update.message.message_id
+                        )
+                        success = True
+                    except Exception as e2:
+                        last_error = f"Forward: {str(e)} | Copy: {str(e2)}"
+            else:
+                # Use copy_message for a clean direct broadcast
+                try:
                     await context.bot.copy_message(
                         chat_id=uid,
                         from_chat_id=update.effective_chat.id,
                         message_id=update.message.message_id
                     )
+                    success = True
+                except Exception as e:
+                    last_error = str(e)
+
+            if success:
+                sent += 1
             else:
-                # Use copy_message for a clean direct broadcast
-                await context.bot.copy_message(
-                    chat_id=uid,
-                    from_chat_id=update.effective_chat.id,
-                    message_id=update.message.message_id
-                )
-            sent += 1
+                failed += 1
         except Exception as e:
-            logger.error(f"Broadcast failed for user {uid}: {e}")
+            logger.error(f"Outer broadcast error for user {uid}: {e}")
+            last_error = f"Outer: {str(e)}"
             failed += 1
         
         # Update progress every 50 users or at the end
@@ -2997,11 +3025,18 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(0.05)
 
     await db.log_admin_action(update.effective_user.id, "Broadcast", f"Sent: {sent}, Failed: {failed}")
-    await status_msg.edit_text(
+    
+    final_text = (
         f"<blockquote>{ce('success')} <b>Broadcast Finished.</b>\n\n"
         f"{ce('success')} <b>Successfully Sent:</b> {sent}\n"
         f"{ce('fail')} <b>Failed:</b> {failed}\n"
-        f"{ce('user')} <b>Total Users:</b> {total}</blockquote>",
+        f"{ce('user')} <b>Total Users:</b> {total}</blockquote>"
+    )
+    if failed > 0:
+        final_text += f"\n\n<i>Last Error: {last_error[:100]}...</i>"
+
+    await status_msg.edit_text(
+        final_text,
         reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END
