@@ -2252,6 +2252,61 @@ async def receive_set_svc_url(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
+# ── Staff Input Handlers ───────────────────────────────────────────────────────
+@staff_required
+async def prompt_add_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await safe_edit_text(
+        update, context,
+        "<blockquote><b>Send the User ID of the new staff member:</b></blockquote>",
+        cancel_kb(),
+    )
+    return WAIT_FOR_ADD_STAFF
+
+
+@staff_required
+async def receive_add_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        uid = int(update.message.text.strip())
+        await db.add_staff(uid)
+        await db.log_admin_action(update.effective_user.id, "Add Staff", f"UID: {uid}")
+        await update.message.reply_text(
+            f"<blockquote>{ce('success')} <b>User {uid} added as Staff.</b></blockquote>",
+            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
+        )
+        return ConversationHandler.END
+    except Exception:
+        await update.message.reply_text("Invalid ID.", reply_markup=cancel_kb())
+        return WAIT_FOR_ADD_STAFF
+
+
+@staff_required
+async def prompt_rem_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await safe_edit_text(
+        update, context,
+        "<blockquote><b>Send the User ID of the staff member to remove:</b></blockquote>",
+        cancel_kb(),
+    )
+    return WAIT_FOR_REM_STAFF
+
+
+@staff_required
+async def receive_rem_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        uid = int(update.message.text.strip())
+        await db.remove_staff(uid)
+        await db.log_admin_action(update.effective_user.id, "Remove Staff", f"UID: {uid}")
+        await update.message.reply_text(
+            f"<blockquote>{ce('success')} <b>User {uid} removed from Staff.</b></blockquote>",
+            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
+        )
+        return ConversationHandler.END
+    except Exception:
+        await update.message.reply_text("Invalid ID.", reply_markup=cancel_kb())
+        return WAIT_FOR_REM_STAFF
+
+
 # ── User conversations ─────────────────────────────────────────────────────────
 @verification_required
 async def prompt_add_funds(update: Update, context: ContextTypes.DEFAULT_TYPE):
