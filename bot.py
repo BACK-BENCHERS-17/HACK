@@ -2940,70 +2940,56 @@ async def prompt_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @staff_required
 async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg:
+        return ConversationHandler.END
+
     user_ids = await db.get_all_verified_user_ids()
     total = len(user_ids)
     if total == 0:
-        await update.message.reply_text(f"{ce('fail')} No verified users to broadcast to.", parse_mode=ParseMode.HTML)
+        await msg.reply_text(f"{ce('fail')} No verified users to broadcast to.", parse_mode=ParseMode.HTML)
         return ConversationHandler.END
 
     sent, failed = 0, 0
     last_error = "None"
-    status_msg = await update.message.reply_text(f"{ce('broadcast')} <b>Broadcast started to {total} users...</b>", parse_mode=ParseMode.HTML)
+    status_msg = await msg.reply_text(f"{ce('broadcast')} <b>Broadcast started to {total} users...</b>", parse_mode=ParseMode.HTML)
+    
+    # Check if the message is a forward safely
+    is_forwarded = False
+    if msg.forward_origin or msg.forward_from or msg.forward_from_chat or msg.forward_signature:
+        is_forwarded = True
     
     start_time = time.time()
     
     for i, uid in enumerate(user_ids):
+        success = False
         try:
-            # Check if the message is a forward
-            msg = update.message
-            # Improved forward detection
-            is_forwarded = any([
-                msg.forward_date, msg.forward_from, msg.forward_from_chat, 
-                msg.forward_from_message_id, msg.forward_signature, msg.forward_sender_name,
-                hasattr(msg, 'forward_origin') and msg.forward_origin is not None
-            ])
-            
-            success = False
             if is_forwarded:
                 try:
                     # Try to preserve "Forwarded from" tag
-                    await context.bot.forward_message(
-                        chat_id=uid,
-                        from_chat_id=update.effective_chat.id,
-                        message_id=update.message.message_id
-                    )
+                    await msg.forward(chat_id=uid)
                     success = True
                 except Exception as e:
-                    # Fallback to copy if forwarding is restricted by source privacy
-                    # Or if it's a media type that can't be forwarded easily in this context
+                    # Fallback to copy if forwarding is restricted
                     try:
-                        await context.bot.copy_message(
-                            chat_id=uid,
-                            from_chat_id=update.effective_chat.id,
-                            message_id=update.message.message_id
-                        )
+                        await msg.copy(chat_id=uid)
                         success = True
                     except Exception as e2:
-                        last_error = f"Forward: {str(e)} | Copy: {str(e2)}"
+                        last_error = f"Fwd: {str(e)} | Copy: {str(e2)}"
             else:
-                # Use copy_message for a clean direct broadcast
+                # Direct copy for Stickers, GIFs, Photos etc.
                 try:
-                    await context.bot.copy_message(
-                        chat_id=uid,
-                        from_chat_id=update.effective_chat.id,
-                        message_id=update.message.message_id
-                    )
+                    await msg.copy(chat_id=uid)
                     success = True
                 except Exception as e:
-                    last_error = str(e)
+                    last_error = f"Copy: {str(e)}"
 
             if success:
                 sent += 1
             else:
                 failed += 1
         except Exception as e:
-            logger.error(f"Outer broadcast error for user {uid}: {e}")
-            last_error = f"Outer: {str(e)}"
+            last_error = f"OuterErr: {str(e)}"
             failed += 1
         
         # Update progress every 50 users or at the end
@@ -3021,7 +3007,7 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         
-        # Rate limiting: ~20 messages per second
+        # Rate limiting
         await asyncio.sleep(0.05)
 
     await db.log_admin_action(update.effective_user.id, "Broadcast", f"Sent: {sent}, Failed: {failed}")
@@ -3033,7 +3019,8 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{ce('user')} <b>Total Users:</b> {total}</blockquote>"
     )
     if failed > 0:
-        final_text += f"\n\n<i>Last Error: {last_error[:100]}...</i>"
+        # Show full error for debugging
+        final_text += f"\n\n<b>DEBUG ERROR:</b>\n<code>{last_error}</code>"
 
     await status_msg.edit_text(
         final_text,
