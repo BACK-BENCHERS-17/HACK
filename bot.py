@@ -2973,14 +2973,16 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.forward_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
                     success = True
                 except Exception as e:
-                    if "Forbidden" in str(e) or "deactivated" in str(e):
+                    err_s = str(e).lower()
+                    if any(x in err_s for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
                         blocked += 1
                         continue
                     try:
                         await context.bot.copy_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
                         success = True
                     except Exception as e2:
-                        if "Forbidden" in str(e2) or "deactivated" in str(e2):
+                        err_s2 = str(e2).lower()
+                        if any(x in err_s2 for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
                             blocked += 1
                         else:
                             last_error = f"Fwd: {str(e)} | Copy: {str(e2)}"
@@ -2989,7 +2991,8 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.copy_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
                     success = True
                 except Exception as e:
-                    if "Forbidden" in str(e) or "deactivated" in str(e):
+                    err_s = str(e).lower()
+                    if any(x in err_s for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
                         blocked += 1
                     else:
                         last_error = f"Copy: {str(e)}"
@@ -2997,10 +3000,13 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if success:
                 sent += 1
             else:
-                if not success and "Forbidden" not in last_error and "deactivated" not in last_error:
+                # If not a known block/forbidden error, count as failed
+                curr_err = str(last_error).lower()
+                if not any(x in curr_err for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
                     failed += 1
         except Exception as e:
-            if "Forbidden" in str(e) or "deactivated" in str(e):
+            err_s = str(e).lower()
+            if any(x in err_s for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
                 blocked += 1
             else:
                 last_error = f"Outer: {str(e)}"
