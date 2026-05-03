@@ -3028,10 +3028,10 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     final_text = (
         f"<blockquote>{ce('success')} <b>Broadcast Finished.</b>\n\n"
-        f"✅ <b>Successfully Sent:</b> {sent}\n"
-        f"❌ <b>Failed (Error):</b> {failed}\n"
-        f"🚫 <b>Blocked/Deleted:</b> {blocked}\n"
-        f"👥 <b>Total Target:</b> {total}</blockquote>"
+        f"{ce('success')} <b>Successfully Sent:</b> {sent}\n"
+        f"{ce('fail')} <b>Failed (Error):</b> {failed}\n"
+        f"{ce('poop')} <b>Blocked/Deleted:</b> {blocked}\n"
+        f"{ce('user')} <b>Total Target:</b> {total}</blockquote>"
     )
     if failed > 0:
         final_text += f"\n\n<b>LAST TECHNICAL ERROR:</b>\n<code>{last_error[:200]}</code>"
