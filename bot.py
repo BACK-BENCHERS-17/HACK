@@ -2952,12 +2952,16 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sent, failed = 0, 0
     last_error = "None"
-    status_msg = await msg.reply_text(f"{ce('broadcast')} <b>Broadcast started to {total} users...</b>", parse_mode=ParseMode.HTML)
+    status_msg = await msg.reply_text(f"{ce('broadcast')} <b>Broadcast starting for {total} users...</b>", parse_mode=ParseMode.HTML)
     
-    # Check if the message is a forward safely
+    # Ultra-safe forward detection
     is_forwarded = False
-    if msg.forward_origin or msg.forward_from or msg.forward_from_chat or msg.forward_signature:
-        is_forwarded = True
+    try:
+        if getattr(msg, 'forward_origin', None) or getattr(msg, 'forward_from', None) or \
+           getattr(msg, 'forward_from_chat', None) or getattr(msg, 'forward_date', None):
+            is_forwarded = True
+    except Exception:
+        is_forwarded = False
     
     start_time = time.time()
     
@@ -2966,20 +2970,29 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             if is_forwarded:
                 try:
-                    # Try to preserve "Forwarded from" tag
-                    await msg.forward(chat_id=uid)
+                    await context.bot.forward_message(
+                        chat_id=uid,
+                        from_chat_id=msg.chat_id,
+                        message_id=msg.message_id
+                    )
                     success = True
                 except Exception as e:
-                    # Fallback to copy if forwarding is restricted
                     try:
-                        await msg.copy(chat_id=uid)
+                        await context.bot.copy_message(
+                            chat_id=uid,
+                            from_chat_id=msg.chat_id,
+                            message_id=msg.message_id
+                        )
                         success = True
                     except Exception as e2:
                         last_error = f"Fwd: {str(e)} | Copy: {str(e2)}"
             else:
-                # Direct copy for Stickers, GIFs, Photos etc.
                 try:
-                    await msg.copy(chat_id=uid)
+                    await context.bot.copy_message(
+                        chat_id=uid,
+                        from_chat_id=msg.chat_id,
+                        message_id=msg.message_id
+                    )
                     success = True
                 except Exception as e:
                     last_error = f"Copy: {str(e)}"
@@ -2989,11 +3002,11 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 failed += 1
         except Exception as e:
-            last_error = f"OuterErr: {str(e)}"
+            last_error = f"Outer: {str(e)}"
             failed += 1
         
-        # Update progress every 50 users or at the end
-        if (i + 1) % 50 == 0 or (i + 1) == total:
+        # Update progress every 5 users for better feedback
+        if (i + 1) % 5 == 0 or (i + 1) == total:
             elapsed = time.time() - start_time
             try:
                 await status_msg.edit_text(
@@ -3007,8 +3020,8 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         
-        # Rate limiting
-        await asyncio.sleep(0.05)
+        # Safe rate limit
+        await asyncio.sleep(0.08)
 
     await db.log_admin_action(update.effective_user.id, "Broadcast", f"Sent: {sent}, Failed: {failed}")
     
@@ -3019,8 +3032,7 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{ce('user')} <b>Total Users:</b> {total}</blockquote>"
     )
     if failed > 0:
-        # Show full error for debugging
-        final_text += f"\n\n<b>DEBUG ERROR:</b>\n<code>{last_error}</code>"
+        final_text += f"\n\n<b>LAST ERROR:</b>\n<code>{last_error[:200]}</code>"
 
     await status_msg.edit_text(
         final_text,
