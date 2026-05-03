@@ -2950,7 +2950,7 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"{ce('fail')} No verified users to broadcast to.", parse_mode=ParseMode.HTML)
         return ConversationHandler.END
 
-    sent, failed = 0, 0
+    sent, failed, blocked = 0, 0, 0
     last_error = "None"
     status_msg = await msg.reply_text(f"{ce('broadcast')} <b>Broadcast starting for {total} users...</b>", parse_mode=ParseMode.HTML)
     
@@ -2970,42 +2970,43 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             if is_forwarded:
                 try:
-                    await context.bot.forward_message(
-                        chat_id=uid,
-                        from_chat_id=msg.chat_id,
-                        message_id=msg.message_id
-                    )
+                    await context.bot.forward_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
                     success = True
                 except Exception as e:
+                    if "Forbidden" in str(e) or "deactivated" in str(e):
+                        blocked += 1
+                        continue
                     try:
-                        await context.bot.copy_message(
-                            chat_id=uid,
-                            from_chat_id=msg.chat_id,
-                            message_id=msg.message_id
-                        )
+                        await context.bot.copy_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
                         success = True
                     except Exception as e2:
-                        last_error = f"Fwd: {str(e)} | Copy: {str(e2)}"
+                        if "Forbidden" in str(e2) or "deactivated" in str(e2):
+                            blocked += 1
+                        else:
+                            last_error = f"Fwd: {str(e)} | Copy: {str(e2)}"
             else:
                 try:
-                    await context.bot.copy_message(
-                        chat_id=uid,
-                        from_chat_id=msg.chat_id,
-                        message_id=msg.message_id
-                    )
+                    await context.bot.copy_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
                     success = True
                 except Exception as e:
-                    last_error = f"Copy: {str(e)}"
+                    if "Forbidden" in str(e) or "deactivated" in str(e):
+                        blocked += 1
+                    else:
+                        last_error = f"Copy: {str(e)}"
 
             if success:
                 sent += 1
             else:
-                failed += 1
+                if not success and "Forbidden" not in last_error and "deactivated" not in last_error:
+                    failed += 1
         except Exception as e:
-            last_error = f"Outer: {str(e)}"
-            failed += 1
+            if "Forbidden" in str(e) or "deactivated" in str(e):
+                blocked += 1
+            else:
+                last_error = f"Outer: {str(e)}"
+                failed += 1
         
-        # Update progress every 5 users for better feedback
+        # Update progress every 5 users
         if (i + 1) % 5 == 0 or (i + 1) == total:
             elapsed = time.time() - start_time
             try:
@@ -3013,6 +3014,7 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{ce('broadcast')} <b>Broadcast in progress...</b>\n\n"
                     f"{ce('success')} <b>Sent:</b> {sent}\n"
                     f"{ce('fail')} <b>Failed:</b> {failed}\n"
+                    f"{ce('poop')} <b>Blocked/Deleted:</b> {blocked}\n"
                     f"{ce('stats')} <b>Progress:</b> {i+1}/{total}\n"
                     f"{ce('time')} <b>Elapsed:</b> {int(elapsed)}s",
                     parse_mode=ParseMode.HTML
@@ -3020,19 +3022,19 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         
-        # Safe rate limit
         await asyncio.sleep(0.08)
 
-    await db.log_admin_action(update.effective_user.id, "Broadcast", f"Sent: {sent}, Failed: {failed}")
+    await db.log_admin_action(update.effective_user.id, "Broadcast", f"Sent: {sent}, Failed: {failed}, Blocked: {blocked}")
     
     final_text = (
         f"<blockquote>{ce('success')} <b>Broadcast Finished.</b>\n\n"
-        f"{ce('success')} <b>Successfully Sent:</b> {sent}\n"
-        f"{ce('fail')} <b>Failed:</b> {failed}\n"
-        f"{ce('user')} <b>Total Users:</b> {total}</blockquote>"
+        f"✅ <b>Successfully Sent:</b> {sent}\n"
+        f"❌ <b>Failed (Error):</b> {failed}\n"
+        f"🚫 <b>Blocked/Deleted:</b> {blocked}\n"
+        f"👥 <b>Total Target:</b> {total}</blockquote>"
     )
     if failed > 0:
-        final_text += f"\n\n<b>LAST ERROR:</b>\n<code>{last_error[:200]}</code>"
+        final_text += f"\n\n<b>LAST TECHNICAL ERROR:</b>\n<code>{last_error[:200]}</code>"
 
     await status_msg.edit_text(
         final_text,
