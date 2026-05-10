@@ -26,6 +26,7 @@ import asyncio
 import base64
 import email
 import hashlib
+import hmac
 import imaplib
 import io
 import logging
@@ -35,7 +36,7 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header
-from typing import Optional
+from typing import Optional, Dict
 
 import qrcode
 from aiohttp import web
@@ -153,6 +154,115 @@ except Exception as _e:
     log.warning("Could not create UTR/txn unique indexes: %s", _e)
 
 _qr_cache: dict[str, bytes] = {}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Authentication & Security
+# ──────────────────────────────────────────────────────────────────────────────
+auth_tokens: Dict[str, int] = {}  # token -> user_id
+otp_store: Dict[str, Dict] = {}   # mobile -> {otp, user_id, expires}
+
+def _verify_telegram_data(init_data: str) -> Optional[int]:
+    """Verify Telegram WebApp initData and return user_id if valid."""
+    if not init_data:
+        return None
+    try:
+        from urllib.parse import parse_qs
+        import json
+        vals = dict(parse_qs(init_data))
+        hash_val = vals.get("hash", [None])[0]
+        if not hash_val: return None
+        
+        # Sort keys and create data-check-string
+        data_keys = sorted([k for k in vals.keys() if k != "hash"])
+        data_check_string = "\n".join([f"{k}={vals[k][0]}" for k in data_keys])
+        
+        # Secret key is HMAC-SHA256 of bot token with "WebAppData"
+        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        
+        if computed_hash == hash_val:
+            user_data = json.loads(vals.get("user", ["{}"])[0])
+            return int(user_data.get("id"))
+    except Exception as e:
+        log.error("Auth verification failed: %s", e)
+    return None
+
+
+async def request_otp(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+        mobile = body.get("mobile", "").strip()
+    except Exception:
+        return _err("Invalid request")
+
+    if not _validate_mobile(mobile):
+        return _err("Invalid mobile number format.")
+
+    # Check if user exists with this mobile
+    user = await asyncio.to_thread(db_mgr.db.users.find_one, {"phone_number": mobile})
+    if not user:
+        norm_mobile = mobile.lstrip("+")
+        user = await asyncio.to_thread(db_mgr.db.users.find_one, {"phone_number": norm_mobile})
+    
+    if not user:
+        return _err("No account found with this mobile number. Please verify your number in the bot first.")
+
+    user_id = user["user_id"]
+    otp = str(secrets.randbelow(900000) + 100000)
+    otp_store[mobile] = {"otp": otp, "user_id": user_id, "expires": time.time() + 300}
+
+    # Send OTP via bot
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            text = (
+                f"<blockquote><b>🔐 LOGIN VERIFICATION</b></blockquote>\n\n"
+                f"Your Web Store login OTP is: <code>{otp}</code>\n"
+                f"<i>Valid for 5 minutes. Do not share this with anyone!</i>"
+            )
+            api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            await session.post(api_url, json={"chat_id": user_id, "text": text, "parse_mode": "HTML"})
+        return _success({"message": "OTP sent to your Telegram bot."})
+    except Exception as e:
+        log.error("Failed to send OTP: %s", e)
+        return _err("Failed to send OTP. Please try again later.")
+
+
+async def verify_otp(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+        mobile = body.get("mobile", "").strip()
+        otp = body.get("otp", "").strip()
+    except Exception:
+        return _err("Invalid request")
+
+    stored = otp_store.get(mobile)
+    if not stored or stored["otp"] != otp or time.time() > stored["expires"]:
+        return _err("Invalid or expired OTP.")
+
+    token = secrets.token_urlsafe(32)
+    user_id = stored["user_id"]
+    auth_tokens[token] = user_id
+    
+    if mobile in otp_store: del otp_store[mobile]
+    
+    return _success({"token": token, "user_id": user_id})
+
+
+def _get_auth_user(request: web.Request) -> Optional[int]:
+    """Helper to get user_id from headers (either token or initData)."""
+    # 1. Check for custom auth token
+    token = request.headers.get("X-Auth-Token")
+    if token and token in auth_tokens:
+        return auth_tokens[token]
+    
+    # 2. Check for Telegram initData
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    if init_data:
+        return _verify_telegram_data(init_data)
+    
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1032,8 +1142,10 @@ def make_app() -> web.Application:
     # API routes for Web App
     app.router.add_get("/api/products", get_products)
     app.router.add_get("/api/plans/{prod_id}", get_plans)
-    app.router.add_get("/api/user/{user_id}", get_user_profile)
-    app.router.add_get("/api/user/{user_id}/keys", get_user_keys)
+    app.router.add_post("/api/auth/request_otp", request_otp)
+    app.router.add_post("/api/auth/verify_otp", verify_otp)
+    app.router.add_get("/api/user/profile", get_user_profile)
+    app.router.add_get("/api/user/keys", get_user_keys)
     app.router.add_get("/api/settings", get_global_settings)
     app.router.add_get("/api/test_mail", test_mail_connection)
 

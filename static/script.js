@@ -11,6 +11,7 @@ let currentUser = null;
 let activeTab = 'home';
 let globalSettings = {};
 let authenticatedUserId = null;
+let sessionToken = localStorage.getItem('hack_store_auth_token');
 
 // Initialize Telegram WebApp
 tg.expand();
@@ -21,7 +22,7 @@ if (tg.initDataUnsafe?.user) {
     currentUser = tg.initDataUnsafe.user;
     authenticatedUserId = currentUser.id;
 } else {
-    // Check if we have a stored session ID
+    // If we have a stored session, use it
     authenticatedUserId = localStorage.getItem('hack_store_user_id');
 }
 
@@ -31,9 +32,30 @@ if (tg.initDataUnsafe?.user) {
 async function apiFetch(endpoint, method = 'GET', body = null) {
     showLoader();
     try {
-        const options = { method, headers: { 'Content-Type': 'application/json' } };
+        const headers = { 'Content-Type': 'application/json' };
+        
+        // Pass either Telegram initData or custom session token for auth
+        if (tg.initData) {
+            headers['X-Telegram-Init-Data'] = tg.initData;
+        }
+        if (sessionToken) {
+            headers['X-Auth-Token'] = sessionToken;
+        }
+
+        const options = { method, headers };
         if (body) options.body = JSON.stringify(body);
+        
         const res = await fetch(endpoint, options);
+        
+        if (res.status === 401) {
+            authenticatedUserId = null;
+            sessionToken = null;
+            localStorage.removeItem('hack_store_auth_token');
+            localStorage.removeItem('hack_store_user_id');
+            renderTab();
+            throw new Error("Session expired. Please login again.");
+        }
+
         const data = await res.json();
         if (data.status === 'success' || data.status === 'ok') return data.data || data;
         throw new Error(data.message || 'API Error');
@@ -88,6 +110,7 @@ async function renderTab() {
         if (settings) globalSettings = settings;
     }
 
+    // Home is public, others require auth
     if (!authenticatedUserId && activeTab !== 'home') {
         showLoginRequired();
         return;
@@ -102,34 +125,64 @@ async function renderTab() {
 function showLoginRequired() {
     mainContent.innerHTML = `
         <div style="text-align: center; padding: 60px 20px;">
-            <i class="fas fa-lock" style="font-size: 64px; color: var(--accent-color); margin-bottom: 24px;"></i>
-            <h2>Login Required</h2>
-            <p style="color: var(--text-secondary); margin: 16px 0 32px;">We couldn't detect your Telegram account. Please enter your User ID to continue.</p>
-            <div style="background: var(--card-bg); padding: 16px; border-radius: 12px; border: 1px solid var(--border-color); margin-bottom: 24px;">
-                <input type="number" id="login-user-id" placeholder="Your Telegram ID" style="width: 100%; background: transparent; border: none; color: white; text-align: center; font-size: 18px; outline: none;">
+            <i class="fas fa-shield-alt" style="font-size: 64px; color: var(--accent-color); margin-bottom: 24px;"></i>
+            <h2>Secure Login</h2>
+            <p style="color: var(--text-secondary); margin: 16px 0 32px;">Please login with your mobile number to access your wallet and keys.</p>
+            
+            <div id="auth-step-1">
+                <div style="background: var(--card-bg); padding: 16px; border-radius: 12px; border: 1px solid var(--border-color); margin-bottom: 24px;">
+                    <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 8px; text-align: left;">Mobile Number (with country code)</div>
+                    <input type="text" id="login-mobile" placeholder="+919876543210" style="width: 100%; background: transparent; border: none; color: white; font-size: 18px; outline: none;">
+                </div>
+                <button class="btn btn-primary" onclick="requestLoginOtp()">Send OTP to Bot</button>
             </div>
-            <button class="btn btn-primary" onclick="loginWithId()">Login & Continue</button>
-            <p style="font-size: 11px; color: var(--text-secondary); margin-top: 20px;">You can find your ID by typing /info in the bot.</p>
+
+            <div id="auth-step-2" class="hidden">
+                <div style="background: var(--card-bg); padding: 16px; border-radius: 12px; border: 1px solid var(--border-color); margin-bottom: 24px;">
+                    <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 8px; text-align: left;">Enter 6-Digit OTP</div>
+                    <input type="number" id="login-otp" placeholder="123456" style="width: 100%; background: transparent; border: none; color: white; text-align: center; font-size: 24px; font-weight: 800; letter-spacing: 4px; outline: none;">
+                </div>
+                <button class="btn btn-primary" onclick="verifyLoginOtp()">Verify & Login</button>
+                <button class="btn btn-secondary" onclick="document.getElementById('auth-step-2').classList.add('hidden'); document.getElementById('auth-step-1').classList.remove('hidden');" style="margin-top: 12px;">Back</button>
+            </div>
+            
+            <p style="font-size: 11px; color: var(--text-secondary); margin-top: 32px;">Don't have an account? <br>Verify your number in the bot first.</p>
         </div>
     `;
 }
 
-async function loginWithId() {
-    const id = document.getElementById('login-user-id').value;
-    if (!id || id.length < 5) {
-        tg.showAlert("Please enter a valid Telegram User ID.");
+async function requestLoginOtp() {
+    const mobile = document.getElementById('login-mobile').value.trim();
+    if (!mobile || mobile.length < 10) {
+        tg.showAlert("Please enter a valid mobile number.");
         return;
     }
     
-    // Test if user exists
-    const user = await apiFetch(`/api/user/${id}`);
-    if (user && user.user_id) {
-        authenticatedUserId = id;
-        localStorage.setItem('hack_store_user_id', id);
+    const res = await apiFetch('/api/auth/request_otp', 'POST', { mobile });
+    if (res) {
+        document.getElementById('auth-step-1').classList.add('hidden');
+        document.getElementById('auth-step-2').classList.remove('hidden');
+        tg.showAlert("OTP sent! Check your Telegram bot.");
+    }
+}
+
+async function verifyLoginOtp() {
+    const mobile = document.getElementById('login-mobile').value.trim();
+    const otp = document.getElementById('login-otp').value.trim();
+    
+    if (!otp || otp.length < 4) {
+        tg.showAlert("Please enter the OTP.");
+        return;
+    }
+    
+    const res = await apiFetch('/api/auth/verify_otp', 'POST', { mobile, otp });
+    if (res && res.token) {
+        sessionToken = res.token;
+        authenticatedUserId = res.user_id;
+        localStorage.setItem('hack_store_auth_token', res.token);
+        localStorage.setItem('hack_store_user_id', res.user_id);
         renderTab();
         tg.HapticFeedback.notificationOccurred('success');
-    } else {
-        tg.showAlert("User not found in database. Please start the bot first.");
     }
 }
 
