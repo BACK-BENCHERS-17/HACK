@@ -334,7 +334,9 @@ async def svc_verify_payment(svc_url: str, token: str, order_id: str) -> dict:
             headers = {"Authorization": f"Bearer {token}"}
             payload = {"order_id": order_id}
             async with session.post(f"{svc_url}/verify_payment", json=payload, headers=headers,
-                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                                    timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status != 200:
+                    return {"status": "error", "message": f"Service HTTP {resp.status}"}
                 return await resp.json()
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -1089,7 +1091,11 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     back_kb("user_main"),
                 )
             else:
-                # Not paid yet
+                # Not paid yet or other error
+                msg = result.get("message", "UPI payments may take up to 2 minutes.")
+                if "not yet received" in msg.lower():
+                    msg = "Please wait a moment and try again. UPI payments may take up to 2 minutes."
+                
                 buttons = [
                     [InlineKeyboardButton("Try Again", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["refresh"][1], style="primary")],
                     [InlineKeyboardButton("Back to Menu", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
@@ -1097,7 +1103,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 await safe_edit_text(
                     update, context,
                     f"<blockquote><b>{ce('fail')} Payment Not Received Yet</b></blockquote>\n\n"
-                    f"<i>Please wait a moment and try again. UPI payments may take up to 2 minutes.</i>\n\n"
+                    f"<i>{msg}</i>\n\n"
                     f"<b>Order ID:</b> <code>{order_id}</code>",
                     InlineKeyboardMarkup(buttons),
                 )

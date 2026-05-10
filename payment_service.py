@@ -58,22 +58,11 @@ log = logging.getLogger("payment_svc")
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 HOST = os.environ.get("PAY_SVC_HOST", "0.0.0.0")
-# Render and many other hosts set the 'PORT' environment variable.
 PORT = int(os.environ.get("PAY_SVC_PORT") or os.environ.get("PORT") or "8000")
 
 
 def _autodetect_public_base() -> str:
-    """Pick a sensible public base URL without admin configuration.
-
-    Priority:
-      1. PAY_SVC_PUBLIC_BASE                      (manual override)
-      2. RENDER_EXTERNAL_URL                      (Render hosting)
-      3. https://$RAILWAY_PUBLIC_DOMAIN           (Railway hosting)
-      4. https://$FLY_APP_NAME.fly.dev            (Fly.io)
-      5. https://$REPLIT_DEV_DOMAIN               (Replit dev preview)
-      6. https://$REPL_SLUG.$REPL_OWNER.repl.co   (legacy Replit URL)
-      7. http://localhost:<PORT>                  (last-resort fallback)
-    """
+    """Pick a sensible public base URL without admin configuration."""
     explicit = os.environ.get("PAY_SVC_PUBLIC_BASE", "").strip().rstrip("/")
     if explicit:
         return explicit
@@ -154,15 +143,13 @@ sessions_col.create_index([("session_token", ASCENDING)], unique=True)
 sessions_col.create_index([("admin_id", ASCENDING)])
 orders_col.create_index([("order_id", ASCENDING)], unique=True)
 orders_col.create_index([("admin_id", ASCENDING)])
-# UTR / Transaction-ID replay protection — sparse so PENDING orders
-# (which have no UTR yet) don't collide.
+
 try:
     orders_col.create_index([("utr", ASCENDING)], unique=True, sparse=True)
     orders_col.create_index([("transaction_id", ASCENDING)], unique=True, sparse=True)
 except Exception as _e:
-    log.warning("Could not create UTR/txn unique indexes (existing duplicates?): %s", _e)
+    log.warning("Could not create UTR/txn unique indexes: %s", _e)
 
-# In-memory QR PNG cache (order_id -> bytes). Survives until process restart.
 _qr_cache: dict[str, bytes] = {}
 
 
@@ -199,7 +186,6 @@ async def _get_session(token: str) -> Optional[dict]:
 
 
 def _normalise_app_password(raw: str) -> str:
-    """Gmail app passwords are 16 chars, often shown as 4×4 with spaces."""
     return re.sub(r"\s+", "", raw or "")
 
 
@@ -220,7 +206,6 @@ def _now_ist_str() -> str:
 # IMAP — credential check + payment search
 # ──────────────────────────────────────────────────────────────────────────────
 def _imap_login_check(email_addr: str, app_password: str) -> tuple[bool, str]:
-    """Try to log in to Gmail IMAP; return (ok, error_message)."""
     try:
         m = imaplib.IMAP4_SSL("imap.gmail.com", 993)
     except Exception as e:
@@ -241,7 +226,6 @@ def _imap_login_check(email_addr: str, app_password: str) -> tuple[bool, str]:
         return False, f"Gmail login error: {e}"
 
 
-# UPI / bank notification senders we look for. Add freely.
 PAYMENT_SENDERS = (
     "fampay",
     "alerts@hdfcbank",
@@ -275,6 +259,59 @@ PAYMENT_SENDERS = (
     "trans.alerts@fampay.in",
     "transactions@fampay.in",
     "noreply@phonepe.com",
+    "federalbank",
+    "bankofbaroda",
+    "centralbank",
+    "onlinesbi",
+    "unionbankofindia",
+    "canarabank",
+    "idbi",
+    "indianbank",
+    "ucombank",
+    "rbl",
+    "dbs",
+    "sc.com",
+    "hsbc",
+    "citi",
+    "payzapp",
+    "bhima",
+    "shriram",
+    "equitas",
+    "au-bank",
+    "paytm.com",
+    "amazon.com",
+    "amazonpay",
+    "jupiter.money",
+    "fi.money",
+    "nsdl",
+    "equitasbank",
+    "shivalikbank",
+    "bandhanbank",
+    "idfc",
+    "tjsb",
+    "svcbank",
+    "cosmosbank",
+    "saraswatbank",
+    "abhyudaya",
+    "citizencredit",
+    "janabank",
+    "suratpeoples",
+    "utkarshbank",
+    "esafbank",
+    "fincarebank",
+    "unitybank",
+    "airtel",
+    "jio",
+    "mobikwik",
+    "freecharge",
+    "omni",
+    "livquik",
+    "pineperks",
+    "slice",
+    "uni",
+    "postpe",
+    "onecard",
+    "dhani",
 )
 
 CREDIT_KEYWORDS = (
@@ -292,20 +329,28 @@ CREDIT_KEYWORDS = (
     "payment of",
     "received a payment",
     "deposit",
+    "txn successful",
+    "transaction successful",
+    "credited to your bank a/c",
+    "amt received",
+    "payment of rs",
+    "transfer from",
+    "transfer of",
+    "credited with",
+    "money in",
+    "cash in",
 )
 
-UTR_RE = re.compile(r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?)[:\s\-/]+([A-Za-z0-9]{8,})", re.I)
-TXN_RE = re.compile(r"\b(?:Txn(?:\s*Id)?|Transaction(?:\s*Id)?|Reference(?:\s*No)?|Ref\s*No)[:\s\-]+([A-Za-z0-9]{8,})", re.I)
+UTR_RE = re.compile(r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?|Ref(?:\.?\s*No)?|Reference(?:\.?\s*No)?|Transaction\s*No)[:\s\-/]+([A-Za-z0-9]{8,})", re.I)
+TXN_RE = re.compile(r"\b(?:Txn(?:\s*Id)?|Transaction(?:\s*Id)?|Reference(?:\s*No)?|Ref\s*No|Transaction\s*Ref)[:\s\-]+([A-Za-z0-9]{8,})", re.I)
 AMOUNT_RE = re.compile(r"(?:Rs\.?|INR|₹|Amount|Amt)[:\s]*([0-9]+(?:[,.][0-9]{1,2})?)", re.I)
-# Sender name patterns: "from Anuj Patel", "received from Anuj Patel", "From: Anuj Patel"
-# Stops at: punctuation, newline, emoji, common follow-up words, or end-of-input.
 SENDER_RE = re.compile(
     r"(?:received\s+(?:money\s+)?from|^from|\bfrom)[:\s]+"
     r"([A-Z0-9][A-Za-z0-9][A-Za-z0-9 .'\-]{1,60}?)"
     r"(?:"
     r"\s*(?:\bvia\b|\bon\b|\bby\b|\busing\b|\bfor\b|\bthrough\b|UPI|@)"
     r"|\s*[•\-–|<\.,!₹]"
-    r"|\s*[^\x00-\x7F]"   # any non-ASCII (covers emojis & symbols)
+    r"|\s*[^\x00-\x7F]"
     r"|\s*\n"
     r"|\s*$"
     r")",
@@ -338,6 +383,7 @@ def _email_text(msg: email.message.Message) -> str:
                 continue
             text = _decode_part(payload, part.get_content_charset())
             if ctype == "text/html":
+                text = text.replace("&nbsp;", " ")
                 text = re.sub(r"<[^>]+>", " ", text)
             parts.append(text)
     else:
@@ -347,10 +393,10 @@ def _email_text(msg: email.message.Message) -> str:
             payload = b""
         text = _decode_part(payload, msg.get_content_charset())
         if (msg.get_content_type() or "").endswith("html"):
+            text = text.replace("&nbsp;", " ")
             text = re.sub(r"<[^>]+>", " ", text)
         parts.append(text)
     body = " ".join(parts)
-    # collapse whitespace + decode subject too
     return re.sub(r"\s+", " ", body)
 
 
@@ -373,10 +419,7 @@ def _decode_header_str(raw: Optional[str]) -> str:
 PLAIN_AMOUNT_RE = re.compile(r"\b([0-9]+(?:[,.][0-9]{1,2})?)\b")
 
 def _amount_matches(text: str, expected: float) -> bool:
-    """True if text contains the expected amount (with rupees-or-paise tolerance)."""
-    # 1. Try with prefixes first (safer)
     found = AMOUNT_RE.findall(text)
-    # 2. Try plain numbers if no prefixed amounts found
     if not found:
         found = PLAIN_AMOUNT_RE.findall(text)
     
@@ -397,150 +440,160 @@ def _amount_matches(text: str, expected: float) -> bool:
     return False
 
 
+def _find_folder_by_attribute(m, attr: str) -> Optional[str]:
+    """Find a Gmail folder name by its attribute (e.g. \\All, \\Junk)."""
+    try:
+        typ, data = m.list()
+        if typ != "OK":
+            return None
+        for line in data:
+            # line is like: (\\HasNoChildren \\All) "/" "[Gmail]/All Mail"
+            decoded = line.decode("utf-8", errors="replace")
+            if attr.lower() in decoded.lower():
+                # Extract the part inside the last set of double quotes
+                parts = re.findall(r'"([^"]+)"', decoded)
+                if parts:
+                    return parts[-1]
+    except Exception:
+        pass
+    return None
+
+
 def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
                        amount: float, order_created_ts: float,
                        used_utrs: Optional[set] = None) -> Optional[dict]:
-    """Search Gmail inbox for a credit notification matching THIS order.
-
-    Anti-replay rules (all enforced):
-      • Email's own Date header must be >= order_created_ts - 120s
-        (so an old payment email cannot satisfy a fresh order).
-      • Either the order_id appears in the email body, OR the amount
-        matches exactly (and we still require email date >= order time).
-      • The extracted UTR / Transaction Id must NOT already be present
-        in `used_utrs` (caller passes UTRs already attached to other
-        orders). If it is, this email is silently skipped.
-
-    Returns dict {utr, transaction_id, sender_name, sender, subject,
-    payment_time_ist} on match, else None.
-    """
     used_utrs = used_utrs or set()
 
     try:
         m = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-    except Exception as e:
-        log.error("IMAP connect failed: %s", e)
-        return None
-
-    try:
         m.login(email_addr, app_password)
     except Exception as e:
-        log.error("IMAP login failed during verify: %s", e)
-        try:
-            m.logout()
-        except Exception:
-            pass
+        log.error("IMAP login failed: %s", e)
         return None
 
+    folders_to_try = ["INBOX"]
+    # Fallback to All Mail if INBOX search yields nothing
+    all_mail = _find_folder_by_attribute(m, "\\All")
+    if all_mail and all_mail not in folders_to_try:
+        folders_to_try.append(all_mail)
+
     try:
-        m.select("INBOX")
-        # Look only at emails from the same DAY (UTC) as the order, with
-        # one-day backward tolerance for orders placed near midnight.
-        since_anchor = max(order_created_ts - 3600, 0)
-        since_date = datetime.fromtimestamp(since_anchor).strftime("%d-%b-%Y")
-        log.info("Searching IMAP for order=%s amount=%.2f since=%s", order_id, amount, since_date)
-        typ, data = m.search(None, f'(SINCE "{since_date}")')
-        if typ != "OK" or not data or not data[0]:
-            log.info("No emails found since %s", since_date)
-            return None
-
-        # Anti-replay tolerance window: email must be no older than
-        # order_created_ts minus 120 seconds (clock skew + delivery race).
-        min_email_ts = order_created_ts - 120
-
-        ids = data[0].split()
-        log.info("Found %d potential emails in inbox since anchor.", len(ids))
-        # Newest first, cap to last 80 messages for speed
-        for msg_id in reversed(ids[-80:]):
-            typ, msg_data = m.fetch(msg_id, "(RFC822)")
-            if typ != "OK" or not msg_data or not msg_data[0]:
-                continue
-            raw = msg_data[0][1]
-            msg = email.message_from_bytes(raw)
-
-            sender = _decode_header_str(msg.get("From", "")).lower()
-            subject = _decode_header_str(msg.get("Subject", ""))
-
-            # Sender filter
-            if not any(s in sender for s in PAYMENT_SENDERS):
-                continue
-            
-            log.info("Checking email from: %s, subject: %s", sender, subject)
-
-            # Anti-replay: enforce that the email itself was received
-            # AFTER the order was placed.
+        for folder in folders_to_try:
+            log.info("Searching folder: %s for order=%s amount=%.2f", folder, order_id, amount)
             try:
-                from email.utils import parsedate_to_datetime
-                email_dt = parsedate_to_datetime(msg.get("Date", ""))
-                email_ts = email_dt.timestamp() if email_dt else 0.0
+                m.select(folder, readonly=True)
             except Exception:
-                email_ts = 0.0
+                continue
+
+            since_anchor = max(order_created_ts - 3600 * 2, 0) # 2 hours ago
+            since_date = datetime.fromtimestamp(since_anchor).strftime("%d-%b-%Y")
             
-            if email_ts and email_ts < min_email_ts:
-                log.info("Skipping old email: %s < %s", email_ts, min_email_ts)
+            typ, data = m.search(None, f'(SINCE "{since_date}")')
+            if typ != "OK" or not data or not data[0]:
+                log.info("No emails found in %s since %s", folder, since_date)
                 continue
 
-            body = _email_text(msg)
-            haystack = (subject + " " + body).lower()
-
-            # Must be a credit / payment received email
-            if not any(kw in haystack for kw in CREDIT_KEYWORDS):
-                log.info("Email does not contain credit keywords.")
+            ids = data[0].split()
+            relevant_ids = ids[-200:] # Increased search range
+            if not relevant_ids:
                 continue
 
-            # Match either by order_id present in body OR by exact amount.
-            # We also check for the last 8 characters of the order_id in case 
-            # the bank/app truncated the transaction note.
-            unique_suffix = order_id[-8:].lower()
-            order_match = (order_id.lower() in haystack) or (unique_suffix in haystack)
-            amt_match = _amount_matches(subject + " " + body, amount)
-
-            if not (order_match or amt_match):
-                log.info("No match for order_id=%s (suffix=%s) or amount=%.2f", order_id, unique_suffix, amount)
+            # Bulk fetch headers to avoid timeouts
+            id_list = ",".join(i.decode() for i in relevant_ids)
+            typ, header_data = m.fetch(id_list, "(BODY[HEADER.FIELDS (FROM SUBJECT DATE)])")
+            if typ != "OK":
                 continue
 
-            # Pull UTR / Txn Id / Sender name from email content
-            scan = subject + "\n" + body
-            mu = UTR_RE.search(scan)
-            mt = TXN_RE.search(scan)
-            ms = SENDER_RE.search(scan)
+            headers_by_id = {}
+            for item in header_data:
+                if isinstance(item, tuple):
+                    msg_id = item[0].split()[0]
+                    headers_by_id[msg_id] = email.message_from_bytes(item[1])
 
-            utr = (mu.group(1) if mu else "").strip()
-            txn = (mt.group(1) if mt else "").strip() or utr
-            sender_name = ""
-            if ms:
-                sender_name = ms.group(1).strip()
-                # Cleanup: strip "your" / "the" / quotes
-                sender_name = re.sub(r"^(your|the)\s+", "", sender_name, flags=re.I).strip(" .,'\"")
+            min_email_ts = order_created_ts - 300 # 5 minutes before order
 
-            # Anti-replay: skip if this UTR/txn was already attached to
-            # any earlier order (the caller supplied the blocklist).
-            if utr and utr in used_utrs:
-                log.warning("Skipping email for order=%s — UTR %s already used elsewhere",
-                            order_id, utr)
-                continue
-            if txn and txn in used_utrs:
-                log.warning("Skipping email for order=%s — Txn %s already used elsewhere",
-                            order_id, txn)
-                continue
+            # Newest first
+            for msg_id_bytes in reversed(relevant_ids):
+                msg_id = msg_id_bytes # e.g. b'80'
+                msg_headers = headers_by_id.get(msg_id)
+                if not msg_headers:
+                    continue
 
-            payment_time_ist = ""
-            try:
-                if email_ts:
-                    payment_time_ist = datetime.fromtimestamp(
-                        email_ts, IST_TZ).strftime("%d-%m-%Y %H:%M:%S")
-            except Exception:
-                pass
+                sender = _decode_header_str(msg_headers.get("From", "")).lower()
+                subject = _decode_header_str(msg_headers.get("Subject", ""))
 
-            return {
-                "utr": utr or f"AUTO-{order_id[-8:]}",
-                "transaction_id": txn or msg.get("Message-Id", "").strip("<>") or f"AUTO-{order_id[-8:]}",
-                "sender_name": sender_name or "Unknown",
-                "sender": sender,
-                "subject": subject,
-                "payment_time_ist": payment_time_ist,
-                "email_ts": email_ts,
-            }
+                is_known_sender = any(s in sender for s in PAYMENT_SENDERS)
+                
+                try:
+                    from email.utils import parsedate_to_datetime
+                    email_dt = parsedate_to_datetime(msg_headers.get("Date", ""))
+                    email_ts = email_dt.timestamp() if email_dt else 0.0
+                except Exception:
+                    email_ts = 0.0
+                
+                if email_ts and email_ts < min_email_ts:
+                    if email_ts < min_email_ts - 3600: # Only skip if more than 1 hour old
+                        continue
+
+                # Basic filter passed, fetch full body
+                typ, msg_data = m.fetch(msg_id_bytes, "(RFC822)")
+                if typ != "OK" or not msg_data or not msg_data[0]:
+                    continue
+                
+                raw = msg_data[0][1]
+                msg = email.message_from_bytes(raw)
+                body = _email_text(msg)
+                haystack = (subject + " " + body).lower()
+
+                if not any(kw in haystack for kw in CREDIT_KEYWORDS):
+                    continue
+
+                unique_suffix = order_id[-8:].lower()
+                order_match = (order_id.lower() in haystack) or (unique_suffix in haystack)
+                amt_match = _amount_matches(subject + " " + body, amount)
+
+                if is_known_sender:
+                    if not (order_match or amt_match):
+                        continue
+                else:
+                    if not (order_match and amt_match):
+                        continue
+
+                scan = subject + "\n" + body
+                mu = UTR_RE.search(scan)
+                mt = TXN_RE.search(scan)
+                ms = SENDER_RE.search(scan)
+
+                utr = (mu.group(1) if mu else "").strip()
+                txn = (mt.group(1) if mt else "").strip() or utr
+                sender_name = ""
+                if ms:
+                    sender_name = ms.group(1).strip()
+                    sender_name = re.sub(r"^(your|the)\s+", "", sender_name, flags=re.I).strip(" .,'\"")
+
+                if utr and utr in used_utrs:
+                    continue
+                if txn and txn in used_utrs:
+                    continue
+
+                payment_time_ist = ""
+                try:
+                    if email_ts:
+                        payment_time_ist = datetime.fromtimestamp(
+                            email_ts, IST_TZ).strftime("%d-%m-%Y %H:%M:%S")
+                except Exception:
+                    pass
+
+                log.info("MATCH FOUND in %s: Order=%s UTR=%s Txn=%s Amt=%.2f", folder, order_id, utr, txn, amount)
+                return {
+                    "utr": utr or f"AUTO-{order_id[-8:]}",
+                    "transaction_id": txn or msg.get("Message-Id", "").strip("<>") or f"AUTO-{order_id[-8:]}",
+                    "sender_name": sender_name or "Unknown",
+                    "sender": sender,
+                    "subject": subject,
+                    "payment_time_ist": payment_time_ist,
+                    "email_ts": email_ts,
+                }
     finally:
         try:
             m.logout()
@@ -550,13 +603,13 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
     return None
 
 
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # QR rendering
 # ──────────────────────────────────────────────────────────────────────────────
 def _build_upi_link(upi_id: str, payee_name: str, amount: float, order_id: str) -> str:
     from urllib.parse import quote
-    # Standard UPI deep-link: pa=VPA, pn=Name, am=Amount, cu=Currency, tn=Note.
-    # We avoid quoting the '@' in the VPA for better scanner compatibility.
     return (
         f"upi://pay?pa={upi_id}"
         f"&pn={quote(payee_name)}"
@@ -595,12 +648,6 @@ async def health(_request: web.Request) -> web.Response:
 
 
 async def login(request: web.Request) -> web.Response:
-    """
-    POST /login
-    body: {admin_id, mobile, email, otp}
-        - "otp" carries the Gmail App Password (the bot's UI labels it
-          'Verification Code / App Password').
-    """
     try:
         body = await request.json()
     except Exception:
@@ -623,9 +670,8 @@ async def login(request: web.Request) -> web.Response:
     if not _validate_email(email_addr):
         return _err("Invalid email address.")
     if len(app_password) != 16 or not re.match(r"^[A-Za-z0-9]+$", app_password):
-        return _err("App Password must be exactly 16 characters (Google App Password format).")
+        return _err("App Password must be exactly 16 characters.")
 
-    # Real check against Gmail IMAP — runs in a thread to avoid blocking event loop.
     loop = asyncio.get_running_loop()
     ok, err = await loop.run_in_executor(None, _imap_login_check, email_addr, app_password)
     if not ok:
@@ -645,7 +691,6 @@ async def login(request: web.Request) -> web.Response:
         }},
         upsert=True,
     )
-    log.info("Login OK for admin_id=%s email=%s", admin_id, email_addr)
     return web.json_response({
         "status": "ok",
         "session_token": token,
@@ -663,12 +708,6 @@ async def logout(request: web.Request) -> web.Response:
 
 
 async def generate_qr(request: web.Request) -> web.Response:
-    """
-    POST /generate_qr
-    body: {admin_id, amount, order_id, upi_id?, payee_name?}
-        - If upi_id is omitted, the most-recently-stored UPI ID for the
-          admin is reused.
-    """
     token = _bearer_token(request)
     sess = await _get_session(token)
     if not sess:
@@ -691,9 +730,7 @@ async def generate_qr(request: web.Request) -> web.Response:
     try:
         amount = float(body.get("amount"))
     except Exception:
-        return _err("amount must be a number (rupees).")
-    if amount <= 0:
-        return _err("amount must be > 0.")
+        return _err("amount must be a number.")
 
     order_id = (body.get("order_id") or "").strip()
     if not order_id:
@@ -701,11 +738,10 @@ async def generate_qr(request: web.Request) -> web.Response:
 
     upi_id = (body.get("upi_id") or sess.get("upi_id") or "").strip()
     if not upi_id or "@" not in upi_id:
-        return _err("upi_id is required (format: name@bank).")
+        return _err("upi_id is required.")
 
     payee_name = (body.get("payee_name") or "Hack Store").strip()[:40]
 
-    # Persist upi_id back onto the session for re-use
     await asyncio.to_thread(
         sessions_col.update_one,
         {"_id": sess["_id"]},
@@ -734,17 +770,14 @@ async def generate_qr(request: web.Request) -> web.Response:
         upsert=True,
     )
 
-    expires_at_ist = datetime.fromtimestamp(expires_at, IST_TZ).strftime("%H:%M IST")
     qr_url = f"{PUBLIC_BASE}/qr/{order_id}.png"
     qr_b64 = base64.b64encode(png).decode("ascii")
-    log.info("QR generated for order=%s amount=%.2f upi=%s", order_id, amount, upi_id)
     return _success({
         "qr_url": qr_url,
         "qr_b64": qr_b64,
         "upi_link": upi_link,
         "amount": amount,
         "order_id": order_id,
-        "expires_at_ist": expires_at_ist,
     })
 
 
@@ -752,7 +785,6 @@ async def serve_qr(request: web.Request) -> web.Response:
     order_id = request.match_info.get("order_id", "")
     png = _qr_cache.get(order_id)
     if not png:
-        # rebuild from DB if cache was cleared (process restart)
         order = orders_col.find_one({"order_id": order_id})
         if not order:
             return web.Response(status=404, text="Not found")
@@ -763,10 +795,6 @@ async def serve_qr(request: web.Request) -> web.Response:
 
 
 async def verify_payment(request: web.Request) -> web.Response:
-    """
-    POST /verify_payment
-    body: {admin_id, order_id}
-    """
     token = _bearer_token(request)
     sess = await _get_session(token)
     if not sess:
@@ -785,31 +813,25 @@ async def verify_payment(request: web.Request) -> web.Response:
     if not order:
         return _err("Order not found.")
 
-    # Check for expiration
     if time.time() > order.get("expires_at", 0) and order.get("status") != "PAID":
-        return _err("Order has expired. Please generate a new QR code.")
+        return _err("Order has expired.")
 
-    # Already verified earlier → return cached result
     if order.get("status") == "PAID":
         return _success({
             "utr": order.get("utr", "N/A"),
             "transaction_id": order.get("transaction_id", "N/A"),
             "amount": order.get("amount", 0),
             "verified_at_ist": order.get("verified_at_ist", ""),
-            "cached": True,
         })
 
     app_password = _dec(sess.get("app_password_enc", ""))
     if not app_password:
         return _err("Stored credentials are unreadable. Please login again.")
 
-    # Anti-replay: collect every UTR / Txn already used by this admin's
-    # other PAID orders, and refuse to credit them again.
     def _collect_utrs():
         u = set()
         for prev in orders_col.find(
-            {"admin_id": sess["admin_id"], "status": "PAID",
-             "order_id": {"$ne": order_id}},
+            {"admin_id": sess["admin_id"], "status": "PAID"},
             {"utr": 1, "transaction_id": 1, "_id": 0},
         ):
             if prev.get("utr"):
@@ -842,8 +864,6 @@ async def verify_payment(request: web.Request) -> web.Response:
     payment_time_ist = (match.get("payment_time_ist")
                         or datetime.now(IST_TZ).strftime("%d-%m-%Y %H:%M:%S"))
 
-    # Final defence — even if the IMAP scanner missed it, the unique
-    # sparse index on `utr` will reject a duplicate write below.
     try:
         await asyncio.to_thread(
             orders_col.update_one,
@@ -861,13 +881,8 @@ async def verify_payment(request: web.Request) -> web.Response:
             }},
         )
     except DuplicateKeyError:
-        log.warning("UTR replay blocked at write: order=%s utr=%s txn=%s",
-                    order_id, utr, txn)
-        return _err("This payment reference has already been used. "
-                    "Please make a fresh payment.")
+        return _err("This payment reference has already been used.")
 
-    log.info("Verified order=%s utr=%s from=%s sender_email=%s",
-             order_id, utr, sender_name, match.get("sender", ""))
     return _success({
         "utr": utr,
         "transaction_id": txn,
@@ -875,20 +890,13 @@ async def verify_payment(request: web.Request) -> web.Response:
         "amount": float(order["amount"]),
         "verified_at_ist": verified_at,
         "payment_time_ist": payment_time_ist,
-        "upi_id": order.get("upi_id", ""),
-        "payee_name": order.get("payee_name", ""),
     })
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# App factory + main
-# ──────────────────────────────────────────────────────────────────────────────
 def make_app() -> web.Application:
     app = web.Application()
-    # Health
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
-    # Internal (used by the Telegram bot itself)
     app.router.add_post("/login", login)
     app.router.add_post("/logout", logout)
     app.router.add_post("/generate_qr", generate_qr)
@@ -899,7 +907,6 @@ def make_app() -> web.Application:
 
 def main() -> None:
     log.info("Starting Hack Store Payment Microservice on %s:%d", HOST, PORT)
-    log.info("Public base for QR URLs: %s", PUBLIC_BASE)
     web.run_app(make_app(), host=HOST, port=PORT, print=None)
 
 
