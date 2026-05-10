@@ -29,6 +29,7 @@ from telegram import (
     KeyboardButton,
     ReplyKeyboardRemove,
     LinkPreviewOptions,
+    WebAppInfo,
 )
 from telegram.constants import ParseMode, ChatAction
 from telegram.error import BadRequest
@@ -519,7 +520,8 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await db.get_user(user_id)
     bal = user.get("balance", 0) / 100
     welcome_text = _welcome_text(bal)
-    await update.message.reply_text(welcome_text, reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
+    svc_url = await db.get_setting("payment_svc_url", "")
+    await update.message.reply_text(welcome_text, reply_markup=main_menu_kb(svc_url), parse_mode=ParseMode.HTML)
 
 
 def _welcome_text(bal: float) -> str:
@@ -560,8 +562,14 @@ def _get_keypad_kb(current_val: str):
     return kb
 
 
-def main_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def main_menu_kb(web_app_url: str = None) -> InlineKeyboardMarkup:
+    buttons = []
+    
+    # Add Web Store button if URL is provided
+    if web_app_url and web_app_url.startswith("http"):
+        buttons.append([InlineKeyboardButton("🔥 OPEN WEB STORE 🔥", web_app=WebAppInfo(url=web_app_url))])
+
+    buttons.extend([
         [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary"),
          InlineKeyboardButton("DOWNLOAD APK", callback_data="user_downloads", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary")],
         [InlineKeyboardButton("ADD FUND", callback_data="user_add_funds", icon_custom_emoji_id=EMOJIS["money"][1], style="success"),
@@ -571,6 +579,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("HOW TO USE", callback_data="user_how_to", icon_custom_emoji_id=EMOJIS["mobile"][1], style="primary"),
          InlineKeyboardButton("SUPPORT", callback_data="user_contact", icon_custom_emoji_id=EMOJIS["contact"][1], style="primary")],
     ])
+    return InlineKeyboardMarkup(buttons)
 
 
 def back_kb(callback_data: str) -> InlineKeyboardMarkup:
@@ -724,7 +733,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     bal = user_data.get("balance", 0) / 100
-    await update.message.reply_text(_welcome_text(bal), reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
+    svc_url = await db.get_setting("payment_svc_url", "")
+    await update.message.reply_text(_welcome_text(bal), reply_markup=main_menu_kb(svc_url), parse_mode=ParseMode.HTML)
 
 
 @verification_required
@@ -739,7 +749,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer()
             user_data = await db.get_user(user_id)
             bal = user_data.get("balance", 0) / 100
-            await safe_edit_text(update, context, _welcome_text(bal), main_menu_kb())
+            svc_url = await db.get_setting("payment_svc_url", "")
+            await safe_edit_text(update, context, _welcome_text(bal), main_menu_kb(svc_url))
 
         # ── Buy Hack ───────────────────────────────────────────────────────────
         elif data == "user_buy_hack":
@@ -1022,9 +1033,10 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         await query.message.delete()
                     except Exception:
                         pass
+                    svc_url = await db.get_setting("payment_svc_url", "")
                     await context.bot.send_message(
                         chat_id=user_id, text=key_text,
-                        reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML,
+                        reply_markup=main_menu_kb(svc_url), parse_mode=ParseMode.HTML,
                     )
 
                     # Detailed admin notification

@@ -44,6 +44,7 @@ from pymongo import ASCENDING, MongoClient
 from pymongo.errors import DuplicateKeyError
 
 from config import BOT_TOKEN, MONGO_DB_NAME, MONGO_URI
+from database import DatabaseManager
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -134,6 +135,7 @@ import dns.resolver  # noqa: E402
 dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
 dns.resolver.default_resolver.nameservers = ["8.8.8.8"]
 
+db_mgr = DatabaseManager()
 _mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
 _db = _mongo[MONGO_DB_NAME]
 sessions_col = _db["payment_sessions"]
@@ -651,6 +653,41 @@ async def health(_request: web.Request) -> web.Response:
     })
 
 
+async def index_handler(_request: web.Request) -> web.FileResponse:
+    if os.path.exists("static/index.html"):
+        return web.FileResponse("static/index.html")
+    return web.Response(text="Hack Store Web App is coming soon!", content_type="text/html")
+
+
+async def get_products(_request: web.Request) -> web.Response:
+    products = await db_mgr.get_active_products()
+    return _success(products)
+
+
+async def get_plans(request: web.Request) -> web.Response:
+    prod_id = request.match_info.get("prod_id")
+    if not prod_id:
+        return _err("Product ID required")
+    plans = await db_mgr.get_plans(int(prod_id))
+    return _success(plans)
+
+
+async def get_user_profile(request: web.Request) -> web.Response:
+    user_id = request.match_info.get("user_id")
+    if not user_id:
+        return _err("User ID required")
+    user = await db_mgr.get_user(int(user_id))
+    return _success(user)
+
+
+async def get_user_keys(request: web.Request) -> web.Response:
+    user_id = request.match_info.get("user_id")
+    if not user_id:
+        return _err("User ID required")
+    keys = await db_mgr.get_user_keys(int(user_id), limit=100)
+    return _success(keys)
+
+
 async def login(request: web.Request) -> web.Response:
     try:
         body = await request.json()
@@ -899,13 +936,24 @@ async def verify_payment(request: web.Request) -> web.Response:
 
 def make_app() -> web.Application:
     app = web.Application()
-    app.router.add_get("/", health)
+    app.router.add_get("/", index_handler)
     app.router.add_get("/health", health)
     app.router.add_post("/login", login)
     app.router.add_post("/logout", logout)
     app.router.add_post("/generate_qr", generate_qr)
     app.router.add_post("/verify_payment", verify_payment)
     app.router.add_get("/qr/{order_id}.png", serve_qr)
+
+    # API routes for Web App
+    app.router.add_get("/api/products", get_products)
+    app.router.add_get("/api/plans/{prod_id}", get_plans)
+    app.router.add_get("/api/user/{user_id}", get_user_profile)
+    app.router.add_get("/api/user/{user_id}/keys", get_user_keys)
+
+    # Static files
+    if os.path.exists("static"):
+        app.router.add_static("/static/", "static", name="static")
+
     return app
 
 
