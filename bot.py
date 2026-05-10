@@ -567,7 +567,7 @@ def main_menu_kb(web_app_url: str = None) -> InlineKeyboardMarkup:
     
     # Add Web Store button if URL is provided
     if web_app_url and web_app_url.startswith("http"):
-        buttons.append([InlineKeyboardButton("🔥 OPEN WEB STORE 🔥", web_app=WebAppInfo(url=web_app_url))])
+        buttons.append([InlineKeyboardButton("🔥 OPEN WEB STORE 🔥", web_app=WebAppInfo(url=web_app_url), icon_custom_emoji_id=EMOJIS["rocket"][1])])
 
     buttons.extend([
         [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary"),

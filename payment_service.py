@@ -491,7 +491,7 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
             except Exception:
                 continue
 
-            since_anchor = max(order_created_ts - 3600 * 2, 0) # 2 hours ago
+            since_anchor = max(order_created_ts - 3600 * 8, 0)  # 8 hours ago for delayed emails
             since_date = datetime.fromtimestamp(since_anchor).strftime("%d-%b-%Y")
             
             typ, data = m.search(None, f'(SINCE "{since_date}")')
@@ -751,6 +751,11 @@ async def logout(request: web.Request) -> web.Response:
 async def generate_qr(request: web.Request) -> web.Response:
     token = _bearer_token(request)
     sess = await _get_session(token)
+    
+    # Fallback for Web App: use the latest active session if no token provided
+    if not sess:
+        sess = await asyncio.to_thread(sessions_col.find_one, {}, sort=[("created_at", -1)])
+        
     if not sess:
         return _err("Invalid or expired session. Please login again.")
 
@@ -838,6 +843,11 @@ async def serve_qr(request: web.Request) -> web.Response:
 async def verify_payment(request: web.Request) -> web.Response:
     token = _bearer_token(request)
     sess = await _get_session(token)
+    
+    # Fallback for Web App
+    if not sess:
+        sess = await asyncio.to_thread(sessions_col.find_one, {}, sort=[("created_at", -1)])
+        
     if not sess:
         return _err("Invalid or expired session. Please login again.")
 

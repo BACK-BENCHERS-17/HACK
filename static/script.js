@@ -5,6 +5,8 @@ const modal = document.getElementById('modal-container');
 const modalBody = document.getElementById('modal-body');
 const closeModal = document.querySelector('.close-modal');
 
+const modalTitle = document.getElementById('modal-title');
+
 let currentUser = null;
 let activeTab = 'home';
 
@@ -12,7 +14,11 @@ let activeTab = 'home';
 tg.expand();
 tg.ready();
 
-const user_id = tg.initDataUnsafe?.user?.id || 8127888290; // Fallback for dev
+// Fix user_id retrieval
+const user_id = tg.initDataUnsafe?.user?.id || 8127888290;
+if (tg.initDataUnsafe?.user) {
+    currentUser = tg.initDataUnsafe.user;
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // API Helpers
@@ -40,12 +46,21 @@ async function apiFetch(endpoint, method = 'GET', body = null) {
 function showLoader() { loader.classList.remove('hidden'); }
 function hideLoader() { loader.classList.add('hidden'); }
 
-function openModal(html) {
+function openModal(title, html) {
+    modalTitle.innerText = title;
     modalBody.innerHTML = html;
     modal.classList.remove('hidden');
+    if (tg.MainButton) tg.MainButton.hide(); 
 }
 
-closeModal.onclick = () => modal.classList.add('hidden');
+closeModal.onclick = () => {
+    modal.classList.add('hidden');
+};
+
+// Close modal on background click
+modal.onclick = (e) => {
+    if (e.target === modal) modal.classList.add('hidden');
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Routing / Tab Logic
@@ -99,13 +114,22 @@ async function renderHome() {
     
     // Support section
     html += `
-        <div class="section-title" style="margin-top: 32px;">Support</div>
-        <div class="product-card" style="width: 100%; display: flex; justify-content: space-between; align-items: center;" onclick="tg.openTelegramLink('https://t.me/HackStoreSupportBot')">
-            <div>
-                <div class="product-name">Need Help?</div>
-                <div style="font-size: 12px; color: var(--text-secondary);">Open a support ticket</div>
+        <div class="section-title" style="margin-top: 32px;">Support & Exit</div>
+        <div class="grid" style="grid-template-columns: 1fr;">
+            <div class="product-card" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;" onclick="tg.openTelegramLink('https://t.me/HackStoreSupportBot')">
+                <div>
+                    <div class="product-name">Need Help?</div>
+                    <div style="font-size: 12px; color: var(--text-secondary);">Open a support ticket</div>
+                </div>
+                <i class="fas fa-headset" style="font-size: 24px; color: var(--accent-color);"></i>
             </div>
-            <i class="fas fa-headset" style="font-size: 24px; color: var(--accent-color);"></i>
+            <div class="product-card" style="display: flex; justify-content: space-between; align-items: center;" onclick="tg.close()">
+                <div>
+                    <div class="product-name" style="color: var(--danger);">Exit Web Store</div>
+                    <div style="font-size: 12px; color: var(--text-secondary);">Return to Telegram bot</div>
+                </div>
+                <i class="fas fa-sign-out-alt" style="font-size: 24px; color: var(--danger);"></i>
+            </div>
         </div>
     `;
     
@@ -177,24 +201,39 @@ async function showProductDetails(prodId) {
     const plans = await apiFetch(`/api/plans/${prodId}`);
     
     let html = `
-        <h2 style="margin-bottom: 12px;">${p.name}</h2>
-        <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 24px;">${p.description || 'No description available.'}</p>
-        <div class="section-title">Select Plan</div>
+        <div class="product-detail-hero">
+            <div class="product-info-header" style="margin-bottom: 12px;">
+                <div class="product-status-tag" style="font-size: 12px; color: var(--success); font-weight: 600;">
+                    <i class="fas fa-check-circle"></i> UNDETECTED & LIVE
+                </div>
+            </div>
+        </div>
+        <p style="color: var(--text-secondary); font-size: 14px; margin: 0 0 24px 0; line-height: 1.6; background: rgba(255,255,255,0.03); padding: 12px; border-radius: 8px; border-left: 3px solid var(--accent-color);">
+            ${p.description || 'Premium hack with advanced features and anti-ban protection.'}
+        </p>
+        <div class="section-title">Select A Plan</div>
     `;
     
-    plans.forEach(plan => {
-        html += `
-            <div class="plan-item" onclick="startPurchase(${plan.id}, ${plan.price}, '${plan.duration}', '${p.name}')">
-                <div>
-                    <div style="font-weight: 600;">${plan.duration}</div>
-                    <div style="font-size: 12px; color: var(--text-secondary);">Instant Delivery</div>
+    if (plans && plans.length > 0) {
+        plans.forEach(plan => {
+            html += `
+                <div class="plan-item" onclick="startPurchase(${plan.id}, ${plan.price}, '${plan.duration}', '${p.name}')">
+                    <div>
+                        <div style="font-weight: 700; font-size: 16px;">${plan.duration}</div>
+                        <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">⚡️ Instant Key Delivery</div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div style="font-weight: 800; color: var(--accent-color); font-size: 18px;">₹${(plan.price/100).toFixed(2)}</div>
+                        <div style="font-size: 10px; color: var(--success);">Best Quality</div>
+                    </div>
                 </div>
-                <div style="font-weight: 700; color: var(--accent-color);">₹${(plan.price/100).toFixed(2)}</div>
-            </div>
-        `;
-    });
+            `;
+        });
+    } else {
+        html += '<div style="text-align: center; color: var(--text-secondary); padding: 20px;">Out of stock.</div>';
+    }
     
-    openModal(html);
+    openModal(p.name, html);
 }
 
 async function startPurchase(planId, pricePaise, duration, prodName) {
@@ -236,18 +275,18 @@ async function startPurchase(planId, pricePaise, duration, prodName) {
         </div>
     `;
     
-    openModal(html);
+    openModal("Complete Payment", html);
 }
 
 async function verifyWebPayment(orderId) {
     const res = await apiFetch('/verify_payment', 'POST', { order_id: orderId });
     if (res && res.status === 'success') {
-        openModal(`
+        openModal("Success", `
             <div style="text-align: center; padding: 20px 0;">
                 <i class="fas fa-check-circle" style="font-size: 64px; color: var(--success); margin-bottom: 20px;"></i>
                 <h2>Payment Verified!</h2>
                 <p style="color: var(--text-secondary); margin: 12px 0 24px;">Your order has been processed successfully.</p>
-                <button class="btn btn-primary" onclick="activeTab='profile'; renderTab(); closeModal.click();">View My Keys</button>
+                <button class="btn btn-primary" onclick="activeTab='profile'; renderTab(); modal.classList.add('hidden');">View My Keys</button>
             </div>
         `);
         tg.HapticFeedback.notificationOccurred('success');
