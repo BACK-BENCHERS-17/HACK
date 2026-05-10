@@ -228,6 +228,10 @@ def _imap_login_check(email_addr: str, app_password: str) -> tuple[bool, str]:
 
 PAYMENT_SENDERS = (
     "fampay",
+    "fampay.in",
+    "trans.alerts@fampay.in",
+    "transactions@fampay.in",
+    "noreply@fampay.in",
     "alerts@hdfcbank",
     "alerts@axisbank",
     "alerts@icicibank",
@@ -252,12 +256,9 @@ PAYMENT_SENDERS = (
     "iob.in",
     "pnb.co.in",
     "idfcfirstbank",
-    "fampay.in",
     "phonepe.com",
     "upi.org",
     "npci.org.in",
-    "trans.alerts@fampay.in",
-    "transactions@fampay.in",
     "noreply@phonepe.com",
     "federalbank",
     "bankofbaroda",
@@ -339,6 +340,9 @@ CREDIT_KEYWORDS = (
     "credited with",
     "money in",
     "cash in",
+    "added to your fampay",
+    "fampay account",
+    "new payment",
 )
 
 UTR_RE = re.compile(r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?|Ref(?:\.?\s*No)?|Reference(?:\.?\s*No)?|Transaction\s*No)[:\s\-/]+([A-Za-z0-9]{8,})", re.I)
