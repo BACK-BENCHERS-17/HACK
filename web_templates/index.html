@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>{{ brand_name }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/web_static/css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Particles Background -->
+        <div class="particles" id="particles"></div>
+
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <i class="fas fa-bolt"></i>
+                <span>{{ brand_name }}</span>
+            </div>
+            <div class="header-actions">
+                <button class="icon-btn" onclick="toggleTheme()">
+                    <i class="fas fa-moon" id="theme-icon"></i>
+                </button>
+                <button class="icon-btn" onclick="toggleNotifications()">
+                    <i class="fas fa-bell"></i>
+                    <span class="notification-dot"></span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main id="main-content">
+            <!-- Content loads here -->
+        </main>
+
+        <!-- Navigation Bar -->
+        <nav class="bottom-nav">
+            <div class="nav-item active" data-tab="home">
+                <i class="fas fa-home"></i>
+                <span>Home</span>
+                <div class="nav-indicator"></div>
+            </div>
+            <div class="nav-item" data-tab="store">
+                <i class="fas fa-store"></i>
+                <span>Store</span>
+                <div class="nav-indicator"></div>
+            </div>
+            <div class="nav-item" data-tab="orders">
+                <i class="fas fa-receipt"></i>
+                <span>Orders</span>
+                <div class="nav-indicator"></div>
+            </div>
+            <div class="nav-item" data-tab="profile">
+                <i class="fas fa-user"></i>
+                <span>Profile</span>
+                <div class="nav-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Modals -->
+        <div class="modal-overlay hidden" id="modal-overlay">
+            <div class="modal">
+                <div class="modal-header">
+                    <h3 id="modal-title">Modal</h3>
+                    <button class="modal-close" onclick="closeModal()">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="modal-body" id="modal-body"></div>
+            </div>
+        </div>
+
+        <!-- Toast Notifications -->
+        <div class="toast-container" id="toast-container"></div>
+    </div>
+
+    <!-- Global Loader -->
+    <div class="global-loader" id="global-loader">
+        <div class="loader-content">
+            <div class="loader-spinner"></div>
+            <p>Loading...</p>
+        </div>
+    </div>
+
+    <!-- Mobile Bottom Safe Area -->
+    <div class="safe-area-bottom"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+    <script src="/web_static/js/particles.js"></script>
+    <script src="/web_static/js/app.js"></script>
+</body>
+</html>

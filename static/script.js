@@ -346,7 +346,7 @@ async function processAddFunds() {
             </div>
             <div style="margin: 20px 0;">
                 <div style="font-size: 24px; font-weight: 800; margin-bottom: 4px;">₹${amt.toFixed(2)}</div>
-                <div style="font-size: 12px; color: var(--text-secondary);">Adding funds for User ID: ${user_id}</div>
+                <div style="font-size: 12px; color: var(--text-secondary);">Adding funds for User ID: ${authenticatedUserId}</div>
             </div>
             <button class="btn btn-primary" onclick="verifyFundPayment('${orderId}', ${amt})">I Have Paid</button>
             <button class="btn btn-secondary" onclick="tg.openLink('${res.upi_link}')">Pay via UPI App</button>

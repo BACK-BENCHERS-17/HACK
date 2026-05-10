@@ -854,15 +854,6 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             svc_token = await db.get_setting("payment_svc_token", "")
             admin_upi = await db.get_setting("upi_id", "")
 
-            if not svc_token:
-                await safe_edit_text(
-                    update, context,
-                    f"<blockquote>{ce('fail')} <b>Payment service not configured.</b>\n"
-                    f"Please ask admin to login to the UPI session first.</blockquote>",
-                    back_kb("user_buy_hack"),
-                )
-                return
-
             if not admin_upi or "@" not in admin_upi:
                 await safe_edit_text(
                     update, context,
@@ -871,6 +862,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     back_kb("user_buy_hack"),
                 )
                 return
+
+            # Note: svc_token check relaxed to support fallback sessions on server
 
             # Check for reseller discount
             price_paise = float(plan['price'])
@@ -2468,9 +2461,9 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     svc_token = await db.get_setting("payment_svc_token", "")
     admin_upi = await db.get_setting("upi_id", "")
 
-    if not svc_token or not admin_upi:
+    if not admin_upi:
         text = (
-            f"<blockquote>{ce('fail')} <b>Payment service not configured by admin.</b>\n"
+            f"<blockquote>{ce('fail')} <b>UPI ID not configured by admin.</b>\n"
             f"Please contact support or try again later.</blockquote>"
         )
         if update.callback_query:
@@ -2478,6 +2471,8 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         else:
             await update.message.reply_text(text, reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
         return
+
+    # Note: svc_token check relaxed to support fallback sessions
 
     # Generate a special order ID for funds
     order_id = f"FUND-{user_id}-{uuid.uuid4().hex[:6].upper()}"
@@ -3382,7 +3377,7 @@ def main():
     # ── Callback routers ──────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(
         handle_user_callbacks,
-        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_|add_f_|kp_)",
+        pattern="^(user_|buy_|gen_qr_|verify_pay_|confirm_buy_|add_f_|kp_|pay_bal_)",
     ))
 
     app.add_handler(CallbackQueryHandler(
