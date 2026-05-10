@@ -345,6 +345,13 @@ CREDIT_KEYWORDS = (
     "added to your fampay",
     "fampay account",
     "new payment",
+    "payment successful",
+    "sent you",
+    "paid you",
+    "received rs",
+    "received ₹",
+    "to your account",
+    "amount received",
 )
 
 UTR_RE = re.compile(r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?|Ref(?:\.?\s*No)?|Reference(?:\.?\s*No)?|Transaction\s*No)[:\s\-/]+([A-Za-z0-9]{8,})", re.I)
@@ -439,7 +446,7 @@ def _amount_matches(text: str, expected: float) -> bool:
             val = float(norm)
         except ValueError:
             continue
-        if abs(val - expected) < 0.01:
+        if abs(val - expected) < 1.0:
             return True
         if f"{val:.2f}" in targets:
             return True
@@ -537,7 +544,7 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
                 except Exception:
                     email_ts = 0.0
                 
-                if email_ts and email_ts < min_email_ts:
+                if email_ts and email_ts > 0 and email_ts < min_email_ts:
                     if email_ts < order_created_ts - 86400:
                         continue
 
@@ -695,6 +702,32 @@ async def get_global_settings(_request: web.Request) -> web.Response:
         "brand_name": await db_mgr.get_setting("global_brand_name", "Hack Store"),
     }
     return _success(settings)
+
+
+async def test_mail_connection(request: web.Request) -> web.Response:
+    """Diagnostic endpoint to test IMAP connectivity and mail reading."""
+    token = _bearer_token(request)
+    sess = await _get_session(token)
+    if not sess:
+        # Try latest session if no token (for admin dashboard test)
+        sess = await asyncio.to_thread(sessions_col.find_one, {}, sort=[("created_at", -1)])
+    
+    if not sess:
+        return _err("No active session to test.")
+
+    app_password = _dec(sess.get("app_password_enc", ""))
+    email_addr = sess.get("email")
+
+    try:
+        m = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        m.login(email_addr, app_password)
+        m.select("INBOX")
+        typ, data = m.search(None, "ALL")
+        count = len(data[0].split()) if data[0] else 0
+        m.logout()
+        return _success({"message": "IMAP Connection Successful", "email": email_addr, "emails_found": count})
+    except Exception as e:
+        return _err(f"Mail test failed: {str(e)}")
 
 
 async def login(request: web.Request) -> web.Response:
@@ -1002,6 +1035,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/user/{user_id}", get_user_profile)
     app.router.add_get("/api/user/{user_id}/keys", get_user_keys)
     app.router.add_get("/api/settings", get_global_settings)
+    app.router.add_get("/api/test_mail", test_mail_connection)
 
     # Static files
     if os.path.exists("static"):

@@ -10,15 +10,19 @@ const modalTitle = document.getElementById('modal-title');
 let currentUser = null;
 let activeTab = 'home';
 let globalSettings = {};
+let authenticatedUserId = null;
 
 // Initialize Telegram WebApp
 tg.expand();
 tg.ready();
 
-// Fix user_id retrieval
-const user_id = tg.initDataUnsafe?.user?.id || 8127888290;
+// Auto-detect user or ask for login
 if (tg.initDataUnsafe?.user) {
     currentUser = tg.initDataUnsafe.user;
+    authenticatedUserId = currentUser.id;
+} else {
+    // Check if we have a stored session ID
+    authenticatedUserId = localStorage.getItem('hack_store_user_id');
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -84,10 +88,49 @@ async function renderTab() {
         if (settings) globalSettings = settings;
     }
 
+    if (!authenticatedUserId && activeTab !== 'home') {
+        showLoginRequired();
+        return;
+    }
+
     mainContent.innerHTML = '';
     if (activeTab === 'home') renderHome();
     else if (activeTab === 'store') renderStore();
     else if (activeTab === 'profile') renderProfile();
+}
+
+function showLoginRequired() {
+    mainContent.innerHTML = `
+        <div style="text-align: center; padding: 60px 20px;">
+            <i class="fas fa-lock" style="font-size: 64px; color: var(--accent-color); margin-bottom: 24px;"></i>
+            <h2>Login Required</h2>
+            <p style="color: var(--text-secondary); margin: 16px 0 32px;">We couldn't detect your Telegram account. Please enter your User ID to continue.</p>
+            <div style="background: var(--card-bg); padding: 16px; border-radius: 12px; border: 1px solid var(--border-color); margin-bottom: 24px;">
+                <input type="number" id="login-user-id" placeholder="Your Telegram ID" style="width: 100%; background: transparent; border: none; color: white; text-align: center; font-size: 18px; outline: none;">
+            </div>
+            <button class="btn btn-primary" onclick="loginWithId()">Login & Continue</button>
+            <p style="font-size: 11px; color: var(--text-secondary); margin-top: 20px;">You can find your ID by typing /info in the bot.</p>
+        </div>
+    `;
+}
+
+async function loginWithId() {
+    const id = document.getElementById('login-user-id').value;
+    if (!id || id.length < 5) {
+        tg.showAlert("Please enter a valid Telegram User ID.");
+        return;
+    }
+    
+    // Test if user exists
+    const user = await apiFetch(`/api/user/${id}`);
+    if (user && user.user_id) {
+        authenticatedUserId = id;
+        localStorage.setItem('hack_store_user_id', id);
+        renderTab();
+        tg.HapticFeedback.notificationOccurred('success');
+    } else {
+        tg.showAlert("User not found in database. Please start the bot first.");
+    }
 }
 
 async function renderHome() {
@@ -161,8 +204,8 @@ async function renderStore() {
 }
 
 async function renderProfile() {
-    const user = await apiFetch(`/api/user/${user_id}`);
-    const keys = await apiFetch(`/api/user/${user_id}/keys`);
+    const user = await apiFetch(`/api/user/${authenticatedUserId}`);
+    const keys = await apiFetch(`/api/user/${authenticatedUserId}/keys`);
     
     const displayName = currentUser ? `${currentUser.first_name} ${currentUser.last_name || ''}` : (user?.first_name || 'User');
     const photoUrl = currentUser?.photo_url;
@@ -171,7 +214,7 @@ async function renderProfile() {
         <div class="profile-header">
             ${photoUrl ? `<img src="${photoUrl}" class="avatar" style="object-fit: cover; border: 2px solid var(--accent-color);">` : `<div class="avatar">${displayName[0]}</div>`}
             <div class="user-name" style="font-size: 20px; font-weight: 700; margin-top: 10px;">${displayName}</div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">Telegram ID: <code>${user_id}</code></div>
+            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">Telegram ID: <code>${authenticatedUserId}</code></div>
             <div class="balance-card">
                 <div style="margin-bottom: 8px; color: var(--text-secondary);">Available Balance</div>
                 <div class="balance-amount">₹${((user?.balance || 0)/100).toFixed(2)}</div>
@@ -180,6 +223,7 @@ async function renderProfile() {
                     <button class="btn btn-secondary" onclick="openAddFundsModal();" style="flex: 1; margin-top: 0;">Add Fund</button>
                 </div>
             </div>
+            <button class="btn" style="margin-top: 20px; font-size: 12px; color: var(--danger); background: transparent; border: 1px solid var(--border-color);" onclick="authenticatedUserId=null; localStorage.removeItem('hack_store_user_id'); renderTab();">Logout / Switch</button>
         </div>
         <div class="section-title">My Purchased Keys</div>
         <div class="key-list">
@@ -346,15 +390,29 @@ async function startPurchase(planId, pricePaise, duration, prodName) {
             </div>
             
             <button class="btn btn-primary" onclick="verifyWebPayment('${orderId}')">I Have Paid</button>
-            <button class="btn btn-secondary" onclick="tg.openLink('${res.upi_link}')">Open UPI App</button>
+            <button class="btn btn-secondary" onclick="openUpiApp('${res.upi_link}')">Open UPI App</button>
         </div>
     `;
     
     openModal("Complete Payment", html);
 }
 
+function openUpiApp(link) {
+    try {
+        // Method 1: Telegram SDK
+        tg.openLink(link, { try_instant_view: false });
+        
+        // Fallback: Location redirection
+        setTimeout(() => {
+            window.location.href = link;
+        }, 800);
+    } catch (e) {
+        tg.showAlert("If UPI app doesn't open, please scan the QR code manually.");
+    }
+}
+
 async function verifyWebPayment(orderId) {
-    const res = await apiFetch('/verify_payment', 'POST', { order_id: orderId, user_id: user_id });
+    const res = await apiFetch('/verify_payment', 'POST', { order_id: orderId, user_id: authenticatedUserId });
     if (res && (res.status === 'success' || res.status === 'ok')) {
         const orderData = res.data || res;
         
