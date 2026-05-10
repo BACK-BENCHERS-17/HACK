@@ -538,7 +538,7 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
                     email_ts = 0.0
                 
                 if email_ts and email_ts < min_email_ts:
-                    if email_ts < min_email_ts - 3600: # Only skip if more than 1 hour old
+                    if email_ts < order_created_ts - 86400:
                         continue
 
                 # Basic filter passed, fetch full body
@@ -559,7 +559,7 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
                 amt_match = _amount_matches(subject + " " + body, amount)
 
                 if is_known_sender:
-                    if not (order_match or amt_match):
+                    if not amt_match:
                         continue
                 else:
                     if not (order_match and amt_match):
@@ -688,6 +688,15 @@ async def get_user_keys(request: web.Request) -> web.Response:
     return _success(keys)
 
 
+async def get_global_settings(_request: web.Request) -> web.Response:
+    settings = {
+        "support_link": await db_mgr.get_setting("global_support_link", "https://t.me/HackStoreSupportBot"),
+        "channel_link": await db_mgr.get_setting("global_channel_link", ""),
+        "brand_name": await db_mgr.get_setting("global_brand_name", "Hack Store"),
+    }
+    return _success(settings)
+
+
 async def login(request: web.Request) -> web.Response:
     try:
         body = await request.json()
@@ -779,6 +788,7 @@ async def generate_qr(request: web.Request) -> web.Response:
         return _err("amount must be a number.")
 
     order_id = (body.get("order_id") or "").strip()
+    plan_id = body.get("plan_id")
     if not order_id:
         return _err("order_id is required.")
 
@@ -805,6 +815,7 @@ async def generate_qr(request: web.Request) -> web.Response:
         {"$set": {
             "order_id": order_id,
             "admin_id": admin_id,
+            "plan_id": plan_id,
             "upi_id": upi_id,
             "payee_name": payee_name,
             "amount": amount,
@@ -931,6 +942,37 @@ async def verify_payment(request: web.Request) -> web.Response:
                 "matched_subject": match.get("subject", ""),
             }},
         )
+        
+        # Sync with Bot's balance if it's a fund addition or web purchase
+        # In Web App, we pass user_id in the verify_payment body
+        user_id = body.get("user_id")
+        if user_id:
+            user_id = int(user_id)
+            if order_id.startswith("FUND-"):
+                amount_paise = int(order["amount"] * 100)
+                await db_mgr.update_balance(user_id, amount_paise)
+                log.info("Balance updated for user %s: +%d paise", user_id, amount_paise)
+            
+            elif order_id.startswith("WEB-") and order.get("plan_id"):
+                plan_id = int(order["plan_id"])
+                success, msg, info = await db_mgr.purchase_key_automated(user_id, plan_id)
+                if success:
+                    log.info("Key delivered for WEB- order %s to user %s", order_id, user_id)
+                    # Update order with delivered key info
+                    await asyncio.to_thread(
+                        orders_col.update_one,
+                        {"_id": order["_id"]},
+                        {"$set": {"delivered_key": info.get("key"), "product_info": f"{info['product']} - {info['duration']}"}}
+                    )
+                else:
+                    log.error("Key delivery failed for order %s: %s", order_id, msg)
+                    # Even if delivery fails, we marked it PAID above, but maybe we should add a flag
+                    await asyncio.to_thread(
+                        orders_col.update_one,
+                        {"_id": order["_id"]},
+                        {"$set": {"status": "PAID_NO_STOCK", "delivery_error": msg}}
+                    )
+
     except DuplicateKeyError:
         return _err("This payment reference has already been used.")
 
@@ -959,6 +1001,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/plans/{prod_id}", get_plans)
     app.router.add_get("/api/user/{user_id}", get_user_profile)
     app.router.add_get("/api/user/{user_id}/keys", get_user_keys)
+    app.router.add_get("/api/settings", get_global_settings)
 
     # Static files
     if os.path.exists("static"):

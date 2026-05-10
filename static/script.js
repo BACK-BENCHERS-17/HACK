@@ -9,6 +9,7 @@ const modalTitle = document.getElementById('modal-title');
 
 let currentUser = null;
 let activeTab = 'home';
+let globalSettings = {};
 
 // Initialize Telegram WebApp
 tg.expand();
@@ -78,6 +79,11 @@ document.querySelectorAll('.nav-item').forEach(item => {
 });
 
 async function renderTab() {
+    if (Object.keys(globalSettings).length === 0) {
+        const settings = await apiFetch('/api/settings');
+        if (settings) globalSettings = settings;
+    }
+
     mainContent.innerHTML = '';
     if (activeTab === 'home') renderHome();
     else if (activeTab === 'store') renderStore();
@@ -89,13 +95,13 @@ async function renderHome() {
     let html = `
         <div class="banner">
             <div class="banner-content">
-                <h2>Welcome to Hack Store</h2>
+                <h2>Welcome to ${globalSettings.brand_name || 'Hack Store'}</h2>
                 <p>Premium cheats and tools for top games. Stay undetected, stay on top.</p>
             </div>
         </div>
         <div class="section-title">
             <span>Trending Hacks</span>
-            <span style="color: var(--accent-color); font-size: 13px;">View All</span>
+            <span style="color: var(--accent-color); font-size: 13px;" onclick="activeTab='store'; renderTab();">View All</span>
         </div>
         <div class="grid">
     `;
@@ -113,10 +119,11 @@ async function renderHome() {
     html += '</div>';
     
     // Support section
+    const supportLink = globalSettings.support_link || 'https://t.me/HackStoreSupportBot';
     html += `
         <div class="section-title" style="margin-top: 32px;">Support & Exit</div>
         <div class="grid" style="grid-template-columns: 1fr;">
-            <div class="product-card" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;" onclick="tg.openTelegramLink('https://t.me/HackStoreSupportBot')">
+            <div class="product-card" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;" onclick="tg.openTelegramLink('${supportLink}')">
                 <div>
                     <div class="product-name">Need Help?</div>
                     <div style="font-size: 12px; color: var(--text-secondary);">Open a support ticket</div>
@@ -157,14 +164,21 @@ async function renderProfile() {
     const user = await apiFetch(`/api/user/${user_id}`);
     const keys = await apiFetch(`/api/user/${user_id}/keys`);
     
+    const displayName = currentUser ? `${currentUser.first_name} ${currentUser.last_name || ''}` : (user?.first_name || 'User');
+    const photoUrl = currentUser?.photo_url;
+    
     let html = `
         <div class="profile-header">
-            <div class="avatar">${user?.first_name?.[0] || 'U'}</div>
-            <div class="user-name">${user?.first_name || 'User'}</div>
+            ${photoUrl ? `<img src="${photoUrl}" class="avatar" style="object-fit: cover; border: 2px solid var(--accent-color);">` : `<div class="avatar">${displayName[0]}</div>`}
+            <div class="user-name" style="font-size: 20px; font-weight: 700; margin-top: 10px;">${displayName}</div>
+            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">Telegram ID: <code>${user_id}</code></div>
             <div class="balance-card">
-                <div>Available Balance</div>
+                <div style="margin-bottom: 8px; color: var(--text-secondary);">Available Balance</div>
                 <div class="balance-amount">₹${((user?.balance || 0)/100).toFixed(2)}</div>
-                <button class="btn btn-primary" onclick="activeTab='store'; renderTab();" style="margin-top: 16px;">Top Up / Buy</button>
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button class="btn btn-primary" onclick="activeTab='store'; renderTab();" style="flex: 1; margin-top: 0;">Buy Hack</button>
+                    <button class="btn btn-secondary" onclick="openAddFundsModal();" style="flex: 1; margin-top: 0;">Add Fund</button>
+                </div>
             </div>
         </div>
         <div class="section-title">My Purchased Keys</div>
@@ -195,6 +209,70 @@ async function renderProfile() {
 // ──────────────────────────────────────────────────────────────────────────────
 // Purchase Flow
 // ──────────────────────────────────────────────────────────────────────────────
+function openAddFundsModal() {
+    openModal("Add Funds", `
+        <div style="text-align: center; padding: 10px 0;">
+            <i class="fas fa-wallet" style="font-size: 48px; color: var(--accent-color); margin-bottom: 16px;"></i>
+            <p style="color: var(--text-secondary); margin-bottom: 24px;">Add funds to your wallet to purchase hacks instantly.</p>
+            <div style="background: var(--card-bg); padding: 16px; border-radius: 12px; border: 1px solid var(--border-color); margin-bottom: 24px;">
+                <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">Enter Amount (₹)</div>
+                <input type="number" id="fund-amount" placeholder="Min ₹10" style="width: 100%; background: transparent; border: none; color: white; text-align: center; font-size: 24px; font-weight: 800; outline: none;">
+            </div>
+            <button class="btn btn-primary" onclick="processAddFunds()">Generate Payment QR</button>
+        </div>
+    `);
+}
+
+async function processAddFunds() {
+    const amt = parseFloat(document.getElementById('fund-amount').value);
+    if (!amt || amt < 10) {
+        tg.showAlert("Minimum amount is ₹10.");
+        return;
+    }
+    
+    const orderId = 'FUND-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+    
+    const res = await apiFetch('/generate_qr', 'POST', {
+        amount: amt,
+        order_id: orderId,
+        payee_name: "Hack Store Funds"
+    });
+    
+    if (!res) return;
+    
+    openModal("Scan to Pay", `
+        <div style="text-align: center;">
+            <div class="qr-container">
+                <div class="qr-image">
+                    <img src="data:image/png;base64,${res.qr_b64}" alt="UPI QR">
+                </div>
+            </div>
+            <div style="margin: 20px 0;">
+                <div style="font-size: 24px; font-weight: 800; margin-bottom: 4px;">₹${amt.toFixed(2)}</div>
+                <div style="font-size: 12px; color: var(--text-secondary);">Adding funds for User ID: ${user_id}</div>
+            </div>
+            <button class="btn btn-primary" onclick="verifyFundPayment('${orderId}', ${amt})">I Have Paid</button>
+            <button class="btn btn-secondary" onclick="tg.openLink('${res.upi_link}')">Pay via UPI App</button>
+        </div>
+    `);
+}
+
+async function verifyFundPayment(orderId, amount) {
+    const res = await apiFetch('/verify_payment', 'POST', { order_id: orderId, user_id: user_id });
+    if (res && res.status === 'success') {
+        openModal("Success", `
+            <div style="text-align: center; padding: 20px 0;">
+                <i class="fas fa-check-circle" style="font-size: 64px; color: var(--success); margin-bottom: 20px;"></i>
+                <h2>Funds Added!</h2>
+                <p style="color: var(--text-secondary); margin: 12px 0 24px;">₹${amount.toFixed(2)} has been added to your wallet.</p>
+                <button class="btn btn-primary" onclick="activeTab='profile'; renderTab(); modal.classList.add('hidden');">View Profile</button>
+            </div>
+        `);
+        tg.HapticFeedback.notificationOccurred('success');
+    } else {
+        tg.showAlert('Payment not detected yet. Please wait a few moments.');
+    }
+}
 async function showProductDetails(prodId) {
     const products = await apiFetch('/api/products');
     const p = products.find(x => x.id === prodId);
@@ -240,23 +318,21 @@ async function startPurchase(planId, pricePaise, duration, prodName) {
     const orderId = 'WEB-' + Math.random().toString(36).substring(2, 10).toUpperCase();
     const amount = pricePaise / 100;
     
-    // We need an admin session token to generate QR.
-    // In a real prod environment, the backend would handle this using the active admin's credentials.
-    // For the Mini App, we'll assume the backend can find an active session or we provide a default upi.
-    
-    // Simplified for this HACK project:
     const res = await apiFetch('/generate_qr', 'POST', {
         amount: amount,
         order_id: orderId,
-        payee_name: "Hack Store Web"
+        plan_id: planId,
+        payee_name: "Hack Store Purchase"
     });
     
     if (!res) return;
     
     let html = `
         <div style="text-align: center;">
-            <h2 style="margin-bottom: 8px;">Complete Payment</h2>
-            <div style="color: var(--text-secondary); font-size: 14px; margin-bottom: 20px;">Order ID: ${orderId}</div>
+            <div style="background: var(--card-bg); padding: 12px; border-radius: 8px; margin-bottom: 20px;">
+                <div style="font-size: 11px; color: var(--text-secondary);">Purchasing:</div>
+                <div style="font-weight: 700;">${prodName} (${duration})</div>
+            </div>
             
             <div class="qr-container">
                 <div class="qr-image">
@@ -265,13 +341,12 @@ async function startPurchase(planId, pricePaise, duration, prodName) {
             </div>
             
             <div style="margin: 20px 0;">
-                <div style="font-size: 18px; font-weight: 800; margin-bottom: 4px;">₹${amount.toFixed(2)}</div>
-                <div style="font-size: 12px; color: var(--text-secondary);">Scan with any UPI app</div>
+                <div style="font-size: 24px; font-weight: 800; margin-bottom: 4px;">₹${amount.toFixed(2)}</div>
+                <div style="font-size: 11px; color: var(--text-secondary);">Order ID: ${orderId}</div>
             </div>
             
             <button class="btn btn-primary" onclick="verifyWebPayment('${orderId}')">I Have Paid</button>
-            <button class="btn btn-secondary" onclick="tg.openLink('${res.upi_link}')">Pay via UPI App</button>
-            <p style="font-size: 11px; color: var(--text-secondary); margin-top: 16px;">Please do not close this window until verified.</p>
+            <button class="btn btn-secondary" onclick="tg.openLink('${res.upi_link}')">Open UPI App</button>
         </div>
     `;
     
@@ -279,19 +354,33 @@ async function startPurchase(planId, pricePaise, duration, prodName) {
 }
 
 async function verifyWebPayment(orderId) {
-    const res = await apiFetch('/verify_payment', 'POST', { order_id: orderId });
-    if (res && res.status === 'success') {
+    const res = await apiFetch('/verify_payment', 'POST', { order_id: orderId, user_id: user_id });
+    if (res && (res.status === 'success' || res.status === 'ok')) {
+        const orderData = res.data || res;
+        
+        if (orderData.status === 'PAID_NO_STOCK') {
+            openModal("Out of Stock", `
+                <div style="text-align: center; padding: 20px 0;">
+                    <i class="fas fa-exclamation-triangle" style="font-size: 64px; color: var(--warning); margin-bottom: 20px;"></i>
+                    <h2>Payment Verified!</h2>
+                    <p style="color: var(--text-secondary); margin: 12px 0 24px;">However, the product is currently out of stock. Please contact support with Order ID: <code>${orderId}</code> to receive your key manually.</p>
+                    <button class="btn btn-primary" onclick="tg.openTelegramLink('${globalSettings.support_link}')">Contact Support</button>
+                </div>
+            `);
+            return;
+        }
+
         openModal("Success", `
             <div style="text-align: center; padding: 20px 0;">
                 <i class="fas fa-check-circle" style="font-size: 64px; color: var(--success); margin-bottom: 20px;"></i>
-                <h2>Payment Verified!</h2>
-                <p style="color: var(--text-secondary); margin: 12px 0 24px;">Your order has been processed successfully.</p>
-                <button class="btn btn-primary" onclick="activeTab='profile'; renderTab(); modal.classList.add('hidden');">View My Keys</button>
+                <h2>Purchase Successful!</h2>
+                <p style="color: var(--text-secondary); margin: 12px 0 24px;">Your key has been delivered to your profile.</p>
+                <button class="btn btn-primary" onclick="activeTab='profile'; renderTab(); modal.classList.add('hidden');">View My Key</button>
             </div>
         `);
         tg.HapticFeedback.notificationOccurred('success');
     } else {
-        tg.showAlert('Payment not detected yet. Please wait a few moments and try again.');
+        tg.showAlert('Payment not detected yet. Please wait a few moments.');
     }
 }
 
