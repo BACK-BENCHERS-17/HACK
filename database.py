@@ -413,6 +413,8 @@ class DatabaseManager:
         return await asyncio.to_thread(self.db.keys.count_documents, {"plan_id": int(plan_id), "is_sold": 0})
 
     async def purchase_key_automated(self, user_id: int, plan_id: int) -> Tuple[bool, str, dict]:
+        if plan_id is None:
+            return False, "Plan ID missing in order details.", {}
         def _op():
             plan = self.db.plans.find_one({"_id": int(plan_id)})
             if not plan: return False, "Plan not found.", {}

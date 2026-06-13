@@ -1014,9 +1014,15 @@ async def verify_payment(request: web.Request) -> web.Response:
     if not order_id:
         return _err("order_id is required.")
 
-    order = await asyncio.to_thread(orders_col.find_one, {"order_id": order_id, "admin_id": sess["admin_id"]})
+    # Allow any session to verify if using fallback (no token)
+    admin_filter = {"admin_id": sess["admin_id"]} if token else {}
+    order = await asyncio.to_thread(orders_col.find_one, {"order_id": order_id, **admin_filter})
     if not order:
-        return _err("Order not found.")
+        # Try without admin filter if using fallback session
+        if not token:
+            order = await asyncio.to_thread(orders_col.find_one, {"order_id": order_id})
+        if not order:
+            return _err("Order not found.")
 
     if time.time() > order.get("expires_at", 0) and order.get("status") != "PAID":
         return _err("Order has expired.")
@@ -1091,17 +1097,16 @@ async def verify_payment(request: web.Request) -> web.Response:
         user_id = body.get("user_id")
         if user_id:
             user_id = int(user_id)
-            if order_id.startswith("FUND-"):
+            if order_id.startswith("FUND"):
                 amount_paise = int(order["amount"] * 100)
                 await db_mgr.update_balance(user_id, amount_paise)
                 log.info("Balance updated for user %s: +%d paise", user_id, amount_paise)
-            
-            elif order_id.startswith("WEB-") and order.get("plan_id"):
+
+            elif (order_id.startswith("WEB") or order_id.startswith("HACK") or order_id.startswith("FUND")) and order.get("plan_id"):
                 plan_id = int(order["plan_id"])
                 success, msg, info = await db_mgr.purchase_key_automated(user_id, plan_id)
                 if success:
-                    log.info("Key delivered for WEB- order %s to user %s", order_id, user_id)
-                    # Update order with delivered key info
+                    log.info("Key delivered for order %s to user %s", order_id, user_id)
                     await asyncio.to_thread(
                         orders_col.update_one,
                         {"_id": order["_id"]},
@@ -1109,7 +1114,6 @@ async def verify_payment(request: web.Request) -> web.Response:
                     )
                 else:
                     log.error("Key delivery failed for order %s: %s", order_id, msg)
-                    # Even if delivery fails, we marked it PAID above, but maybe we should add a flag
                     await asyncio.to_thread(
                         orders_col.update_one,
                         {"_id": order["_id"]},
@@ -1119,6 +1123,9 @@ async def verify_payment(request: web.Request) -> web.Response:
     except DuplicateKeyError:
         return _err("This payment reference has already been used.")
 
+    # Fetch fresh order state to get delivered_key etc.
+    final_order = await asyncio.to_thread(orders_col.find_one, {"_id": order["_id"]})
+
     return _success({
         "utr": utr,
         "transaction_id": txn,
@@ -1126,6 +1133,9 @@ async def verify_payment(request: web.Request) -> web.Response:
         "amount": float(order["amount"]),
         "verified_at_ist": verified_at,
         "payment_time_ist": payment_time_ist,
+        "delivered_key": final_order.get("delivered_key"),
+        "product_info": final_order.get("product_info"),
+        "status": final_order.get("status")
     })
 
 

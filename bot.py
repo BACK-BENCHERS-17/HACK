@@ -310,7 +310,7 @@ async def svc_login(svc_url: str, admin_id: int, mobile: str, email: str, otp: s
 
 
 async def svc_generate_qr(svc_url: str, token: str, amount: float,
-                          order_id: str, upi_id: str, payee_name: str = "Hack Store") -> dict:
+                          order_id: str, upi_id: str, plan_id: int = None, payee_name: str = "Hack Store") -> dict:
     """Call POST /generate_qr on the payment microservice."""
     try:
         async with aiohttp.ClientSession() as session:
@@ -319,6 +319,7 @@ async def svc_generate_qr(svc_url: str, token: str, amount: float,
                 "amount": amount,
                 "order_id": order_id,
                 "upi_id": upi_id,
+                "plan_id": plan_id,
                 "payee_name": payee_name,
             }
             async with session.post(f"{svc_url}/generate_qr", json=payload, headers=headers,
@@ -328,12 +329,14 @@ async def svc_generate_qr(svc_url: str, token: str, amount: float,
         return {"status": "error", "message": str(e)}
 
 
-async def svc_verify_payment(svc_url: str, token: str, order_id: str) -> dict:
+async def svc_verify_payment(svc_url: str, token: str, order_id: str, user_id: int = None) -> dict:
     """Call POST /verify_payment on the payment microservice."""
     try:
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {token}"}
             payload = {"order_id": order_id}
+            if user_id:
+                payload["user_id"] = user_id
             async with session.post(f"{svc_url}/verify_payment", json=payload, headers=headers,
                                     timeout=aiohttp.ClientTimeout(total=60)) as resp:
                 if resp.status != 200:
@@ -879,7 +882,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
             # Call microservice (INR)
             payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
-            result = await svc_generate_qr(svc_url, svc_token, price_inr, order_id, admin_upi, payee)
+            result = await svc_generate_qr(svc_url, svc_token, price_inr, order_id, admin_upi, plan_id=plan_id, payee_name=payee)
 
             if result.get("status") != "success":
                 err = result.get("message", "Unknown error")
@@ -951,7 +954,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             svc_token = await db.get_setting("payment_svc_token", "")
 
             logger.info(f"User {user_id} clicking I'VE PAID for order={order_id}. Calling {svc_url}/verify_payment")
-            result = await svc_verify_payment(svc_url, svc_token, order_id)
+            result = await svc_verify_payment(svc_url, svc_token, order_id, user_id)
             logger.info(f"Verification result for order={order_id}: {result.get('status')} - {result.get('message', 'N/A')}")
 
             if result.get("status") == "success":
@@ -1000,8 +1003,35 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     ))
                     return
 
-                # Deliver key automatically
-                success, msg, info = await db.purchase_key_automated(user_id, req["plan_id"])
+                # If it's a balance top-up (FUND order), handle it and return
+                if order_id.startswith("FUND"):
+                    await db.update_fund_request_by_order(order_id, "APPROVED",
+                                                   utr=utr, transaction_id=txn_id,
+                                                   sender_name=sender_name,
+                                                   payment_time=payment_time)
+                    await safe_edit_text(
+                        update, context,
+                        f"<blockquote>{ce('success')} <b>FUNDS ADDED SUCCESSFULLY!</b></blockquote>\n\n"
+                        f"₹{paid_amount:.2f} has been added to your wallet.\n"
+                        f"<b>New Balance:</b> ₹{((await db.get_user(user_id)).get('balance', 0)/100):.2f}\n\n"
+                        f"<i>You can now use this balance to buy any hack.</i>",
+                        main_menu_kb()
+                    )
+                    return
+
+                # If key was already delivered by the microservice, use it
+                if pay_data.get("delivered_key"):
+                    info = {
+                        "key": pay_data.get("delivered_key"),
+                        "product": pay_data.get("product_info", "Premium Hack").split(" - ")[0],
+                        "duration": pay_data.get("product_info", "N/A").split(" - ")[-1],
+                        "expiry": (datetime.now() + timedelta(days=30)).isoformat() # Fallback expiry
+                    }
+                    success = True
+                else:
+                    # Deliver key automatically via bot logic
+                    success, msg, info = await db.purchase_key_automated(user_id, req["plan_id"])
+
                 if success:
                     await db.update_fund_request_by_order(
                         order_id, "APPROVED",
@@ -1686,7 +1716,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 order_id = req.get("order_id")
                 if not order_id:
                     continue
-                result = await svc_verify_payment(svc_url, svc_token, order_id)
+                result = await svc_verify_payment(svc_url, svc_token, order_id, user_id)
                 if result.get("status") == "success":
                     pay_data = result["data"]
                     utr = pay_data.get("utr", "N/A")
@@ -2481,7 +2511,7 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
     # Use awaitable svc_generate_qr (INR)
-    result = await svc_generate_qr(svc_url, svc_token, amt, order_id, admin_upi, payee)
+    result = await svc_generate_qr(svc_url, svc_token, amt, order_id, admin_upi, payee_name=payee)
 
     if result.get("status") == "success":
         pay_data = result["data"]
