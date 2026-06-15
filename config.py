@@ -6,7 +6,7 @@ try:
 except ImportError:
     pass
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8652333340:AAFvRnoKxfk4ICAqz3ga1SkkOoJvebniprM").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
 _admin_raw = os.environ.get("ADMIN_IDS", "8127888290,8396509436").strip()
 ADMIN_IDS = [int(x.strip()) for x in _admin_raw.split(",") if x.strip().isdigit()]

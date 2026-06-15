@@ -16,7 +16,7 @@ app.secret_key = os.environ.get('SECRET_KEY', 'hack-store-secret-' + str(os.uran
 
 MONGO_URI = os.environ.get('MONGO_URI', 'mongodb+srv://bb:bb@cluster0.p68btnn.mongodb.net/?appName=Cluster0')
 MONGO_DB = os.environ.get('MONGO_DB_NAME', 'hack_store_enterprise')
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8652333340:AAFvRnoKxfk4ICAqz3ga1SkkOoJvebniprM')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 ADMIN_IDS = [int(x.strip()) for x in os.environ.get('ADMIN_IDS', '8127888290,8396509436').split(',') if x.strip().isdigit()]
 UPI_ID = os.environ.get('UPI_ID', 'hackstore@fam')
 

@@ -212,15 +212,6 @@ async def post_init(application: Application):
         logger.info(f"Auto-updating payment_svc_url: {_stored_url} -> {_new_url} (PORT={_env_port})")
         await db.set_setting("payment_svc_url", _new_url)
 
-# Auto-fix for Render users who have http://localhost:8000 stored but the service is on a different port.
-_stored_url = db.get_setting("payment_svc_url")
-_env_port = os.environ.get('PORT') or os.environ.get('PAY_SVC_PORT')
-if _env_port and _env_port != "8000" and _stored_url == "http://localhost:8000":
-    _new_url = f"http://localhost:{_env_port}"
-    logger.info(f"Auto-updating payment_svc_url: {_stored_url} -> {_new_url} (PORT={_env_port})")
-    db.set_setting("payment_svc_url", _new_url)
-
-
 # ==============================================================================
 # 4. PRESET PRODUCT DESCRIPTIONS
 # ==============================================================================
@@ -3297,7 +3288,7 @@ async def receive_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 11. MAIN APPLICATION BUILDER & EXECUTION
 # ==============================================================================
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", cmd_admin))
