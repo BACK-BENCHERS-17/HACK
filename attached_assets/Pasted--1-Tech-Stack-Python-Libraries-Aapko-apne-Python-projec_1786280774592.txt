@@ -1,0 +1,351 @@
+ 1. Tech Stack (Python Libraries)
+     Aapko apne Python project me ye libraries use karni
+     chahiye:
+      * IMAP Client: imapclient (standard imaplib se zyada
+        friendly aur clean hai)
+      * Email Parser: mailparser ya Python ka built-in
+   email
+        package.
+      * QR Generator: qrcode (with pillow to generate
+   base64
+        images instantly).
+      * Async Wrapper: Built-in asyncio (blocking network
+        tasks ko threads me chalane ke liye
+   asyncio.to_thread
+        ka use hoga).
+      * Database (Optional): supabase-py ya motor (MongoDB
+        async) ya sqlite3/aiosqlite.
+
+     ---
+
+     2. Core Functional Requirements (Python Version)
+
+     F-1: Non-Blocking IMAP Searches (Sabse Important)
+      * Requirement: Gmail IMAP checks ko background
+   threads
+        me execute karna taaki jab ek user verification
+        command chalaye, toh baaki users bot ko bina kisi
+   lag
+        ke use kar sakein.
+      * Implementation:
+   asyncio.to_thread(sync_imap_function,
+        ...) ka use karke.
+
+     F-2: Base64 QR Code Generator in Python
+      * Requirement: User ke details lekar instantly UPI
+        format QR Code image (PNG/Base64) generate karna
+   bina
+        server par local file save kiye (in-memory buffer
+        implementation).
+
+     F-3: Regex Parsing (Indian Timezone Support)
+      * Requirement: Email body me se Amount, UTR, aur
+   Sender
+        Name extract karna.
+      * Timezone Handing: Email ka standard header
+   timestamp
+        (UTC/GMT) ko India Standard Time (IST) me convert
+        karke 15-minute validity verify karna.
+
+     ---
+
+     3. Python Code Blueprint (How to write the code)
+
+     Aap is structural code ko apne Python bot me
+   implement
+     kar sakte hain:
+
+        1 import asyncio
+        2 import re
+        3 import io
+        4 import base64
+        5 from datetime import datetime, timedelta,
+   timezone
+        6 from imapclient import IMAPClient
+        7 from email import message_from_bytes
+        8 from email.policy import default
+        9 import qrcode
+       10
+       11 # ----------------- 1. QR Code Generator
+   (In-Memory)
+          -----------------
+       12 def generate_upi_qr(upi_id: str, name: str,
+   amount:
+          str) -> str:
+       13     """Generates a base64 encoded UPI QR code
+          image."""
+       14     # Standard UPI URI Scheme
+       15     upi_uri =
+
+   f"upi://pay?pa={upi_id}&pn={name}&am={amount}&cu=INR
+          "
+       16
+       17     qr = qrcode.QRCode(version=1, box_size=10,
+          border=4)
+       18     qr.add_data(upi_uri)
+       19     qr.make(fit=True)
+       20
+       21     img = qr.make_image(fill_color="black",
+          back_color="white")
+       22
+       23     # Save image to bytes buffer to avoid
+   writing on
+          disk
+       24     buffer = io.BytesIO()
+       25     img.save(buffer, format="PNG")
+       26     qr_base64 =
+
+   base64.b64encode(buffer.getvalue()).decode('utf-8')
+       27
+       28     return f"data:image/png;base64,{qr_base64}"
+       29
+       30
+       31 # ----------------- 2. Blocking IMAP Check
+   (Thread
+          safe) -----------------
+       32 def sync_verify_payment(gmail_user: str,
+          gmail_app_pass: str, target_amount: float,
+          target_utr: str = None) -> dict:
+       33     """
+       34     Synchronous function that directly interacts
+          with Gmail IMAP.
+       35     Runs inside thread-pool to avoid freezing
+   the
+          async loop.
+       36     """
+       37     # Clean inputs
+       38     email_clean = gmail_user if "@" in
+   gmail_user
+          else f"{gmail_user}@gmail.com"
+       39     password_clean = gmail_app_pass.replace(" ",
+   "")
+       40
+       41     try:
+       42         # Connect to Gmail over SSL
+       43         with IMAPClient('imap.gmail.com',
+   ssl=True)
+          as client:
+       44             client.login(email_clean,
+          password_clean)
+       45             client.select_folder('INBOX',
+          readonly=True)
+       46
+       47             # Search Query (Search for amount or
+          UTR)
+       48             search_query = target_utr if
+   target_utr
+          else str(target_amount)
+       49             messages = client.search(['TEXT',
+          search_query])
+       50
+       51             if not messages:
+       52                 return {"verified": False,
+          "message": "Transaction not found in inbox."}
+       53
+       54             # Fetch and parse matching emails
+       55             response = client.fetch(messages,
+          ['RFC822'])
+       56             for msg_id, data in
+   response.items():
+       57                 raw_email = data[b'RFC822']
+       58                 email_msg =
+          message_from_bytes(raw_email, policy=default)
+       59
+       60                 # Extract Email Subject and Body
+       61                 subject =
+   email_msg.get('Subject',
+          '')
+       62                 body = ""
+       63                 if email_msg.is_multipart():
+       64                     for part in
+   email_msg.walk():
+       65                         content_type =
+          part.get_content_type()
+       66                         if content_type ==
+          "text/plain":
+       67                             body +=
+          part.get_payload(decode=True).decode('utf-8',
+          errors='ignore')
+       68                 else:
+       69                     body =
+
+   email_msg.get_payload(decode=True).decode('utf-8',
+          errors='ignore')
+       70
+       71                 full_text =
+          f"{subject}\n{body}".lower()
+       72
+       73                 # Check credit keywords
+       74                 credit_keywords = ["received",
+          "credited", "added", "successful"]
+       75                 if not any(kw in full_text for
+   kw in
+          credit_keywords):
+       76                     continue
+       77
+       78                 # Expiry check (Last 15 minutes)
+   -
+          Only if verifying via dynamic amount
+       79                 if not target_utr:
+       80                     email_date =
+          email_msg.get('Date')
+       81                     # Parse GMT/UTC timezone
+   aware
+          time
+       82                     # Using email's
+          parsedate_to_datetime
+       83                     from email.utils import
+          parsedate_to_datetime
+       84                     email_dt =
+          parsedate_to_datetime(email_date)
+       85                     now_dt =
+          datetime.now(timezone.utc)
+       86
+       87                     if (now_dt - email_dt) >
+          timedelta(minutes=15):
+       88                         continue # Ignore
+   expired
+          emails
+       89
+       90                 # Verify amount using Regex
+       91                 # Rs. 25.01 or ₹ 25 or INR 25.00
+       92                 amount_pattern =
+
+   rf"(?:rs\.?|inr|₹|\s|^){re.escape(str(target_amount)
+          )}(?:\.00)?(?:\s|$|\.)"
+       93                 if not re.search(amount_pattern,
+          full_text) and str(target_amount) not in
+   full_text:
+       94                     continue
+       95
+       96                 # Extract UTR (UPI Ref No) if
+   not
+          provided
+       97                 extracted_utr = target_utr
+       98                 if not extracted_utr:
+       99                     utr_match =
+          re.search(r"(?:utr|upi ref no|ref no|reference
+          no)\s*:\s*([0-9]{12})", full_text,
+   re.IGNORECASE)
+      100                     if utr_match:
+      101                         extracted_utr =
+          utr_match.group(1)
+      102
+      103                 # Extract Sender Name
+      104                 sender_name = "UPI User"
+      105                 name_match =
+          re.search(r"(?:from|received
+   from|sender)\s+([a-zA-Z
+          ]{3,30})", body, re.IGNORECASE)
+      106                 if name_match:
+      107                     sender_name =
+          name_match.group(1).strip()
+      108                     if
+          sender_name.lower().endswith(" at"):
+      109                         sender_name =
+          sender_name[:-3].strip()
+      110
+      111                 return {
+      112                     "verified": True,
+      113                     "amount": target_amount,
+      114                     "utr": extracted_utr,
+      115                     "sender_name": sender_name,
+      116                     "message": "Payment verified
+          successfully!"
+      117                 }
+      118
+      119         return {"verified": False, "message":
+   "No
+          matching payment or transaction found."}
+      120
+      121     except Exception as e:
+      122         return {"verified": False, "message":
+   f"IMAP
+          Error: {str(e)}"}
+      123
+      124
+      125 # ----------------- 3. Non-blocking Async
+   Wrapper
+          -----------------
+      126 async def verify_payment_async(gmail_user: str,
+          gmail_app_pass: str, amount: float, utr: str =
+   None)
+          -> dict:
+      127     """
+      128     Asynchronous wrapper that runs the
+   synchronous
+          IMAP check in an executor.
+      129     Use this function inside your Discord or
+          Telegram bot.
+      130     """
+      131     # This prevents freezing the main loop
+      132     return await asyncio.to_thread(
+      133         sync_verify_payment,
+      134         gmail_user,
+      135         gmail_app_pass,
+      136         amount,
+      137         utr
+      138     )
+
+     ---
+
+     Python-Specific Troubleshooting Guide: Aapka Bot Kyun
+     Fail Ho Raha Hai?
+
+     Agar aapne pehle se Python me implementation ki hai
+   aur
+     wo work nahi kar rahi, toh in Python-specific issues
+   ko
+     double check karein:
+
+     1. Blocking Event Loop (The Big Freeze)
+      * Problem: Python bot libraries single-threaded hoti
+        hain. Agar aap imaplib.IMAP4_SSL ko seedhe async
+   def
+        ke andar call karenge, toh jab tak connection
+   complete
+        nahi hoga tab tak bot ka event loop block ho
+   jayega
+        aur bot crash/timeout dega.
+      * Fix: Hamesha IMAP call ko sync function me rakh
+   kar
+        asyncio.to_thread() ke through call karein (jaise
+   upar
+        ke code me bataya gaya hai).
+
+     2. Timezone-Naive Datetime Comparison Crash
+      * Problem: Python me naive datetime (jisme timezone
+   nahi
+        hota) aur timezone-aware datetime (GMT/UTC) ko
+   compare
+        karne par crash ho jata hai: TypeError: can't
+   compare
+        offset-naive and offset-aware datetimes.
+      * Fix: Date parsing ke liye standard library
+        email.utils.parsedate_to_datetime ka use karein,
+   jo
+        timezone-aware object deta hai, aur use
+        datetime.now(timezone.utc) ke sath compare karein.
+
+     3. Multipart Email Body Extraction Issues
+      * Problem: Gmail messages standard strings nahi
+   hote. Wo
+        HTML aur Multipart formats me hote hain. Agar aap
+   body
+        ko direct .get_payload() karenge, toh empty list
+   ya
+        garbage codes mil sakte hain.
+      * Fix: Email ke parts me iterate karke specifically
+        text/plain payload ko decode karna zaroori hai
+   (jaise
+        blueprint code me email_msg.walk() use kiya hai).
+
+     4. Raw Bytes Decoding Crash
+      * Problem: IMAP emails bytes format me retrieve hote
+        hain. Direct decoding utf-8 karne par emojis ya
+        special characters (jaise ₹) ki wajah se code
+   crash ho
+        jata hai: UnicodeDecodeError.
+      * Fix: .decode('utf-8', errors='ignore') ka use
+   karein
+        taaki decoding safely ho jaye.
