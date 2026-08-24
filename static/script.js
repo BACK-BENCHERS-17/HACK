@@ -355,7 +355,7 @@ async function processAddFunds() {
 }
 
 async function verifyFundPayment(orderId, amount) {
-    const res = await apiFetch('/verify_payment', 'POST', { order_id: orderId, user_id: user_id });
+    const res = await apiFetch('/verify_payment', 'POST', { order_id: orderId, user_id: authenticatedUserId });
     if (res && res.status === 'success') {
         openModal("Success", `
             <div style="text-align: center; padding: 20px 0;">
