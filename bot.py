@@ -7,6 +7,7 @@ Payment: Self-hosted UPI microservice (aiohttp).
 
 import asyncio
 import base64
+import html
 import io
 import logging
 import math
@@ -1004,7 +1005,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         f"<b>Order:</b> <code>{order_id}</code>\n"
                         f"<b>Tried UTR:</b> <code>{utr}</code>\n"
                         f"<b>Txn:</b> <code>{txn_id}</code>\n"
-                        f"<b>Sender:</b> {sender_name}\n"
+                        f"<b>Sender:</b> {html.escape(str(sender_name))}\n"
                         f"<i>This UTR was already used by another order. No key was delivered.</i>"
                     ))
                     return
@@ -1084,7 +1085,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         f"{get_line(12)}\n"
                         f"<b>UTR:</b> <code>{utr}</code>\n"
                         f"<b>Txn ID:</b> <code>{txn_id}</code>\n"
-                        f"<b>Sender:</b> {sender_name}\n"
+                        f"<b>Sender:</b> {html.escape(str(sender_name))}\n"
                         f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
                         f"<b>Payment Time:</b> {payment_time}\n"
                         f"{get_line(12)}\n"
@@ -1117,7 +1118,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         f"<b>Amount:</b> ₹{paid_amount}\n"
                         f"<b>UTR:</b> <code>{utr}</code>\n"
                         f"<b>Txn:</b> <code>{txn_id}</code>\n"
-                        f"<b>Sender:</b> {sender_name}\n"
+                        f"<b>Sender:</b> {html.escape(str(sender_name))}\n"
                         f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
                         f"<b>Time:</b> {payment_time}\n"
                         f"<i>Please refund or top-up stock and deliver manually.</i>"
@@ -1639,15 +1640,16 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             d = result.get("data", {})
             folders = d.get("folders", {})
             folder_lines = "\n".join(
-                f"  • <b>{name}:</b> {count} mails" for name, count in folders.items()
+                f"  • <b>{html.escape(str(name))}:</b> {count} mails" for name, count in folders.items()
             ) or "  • No folders scanned"
             latest_credit = d.get("latest_credit")
             credit_line = ""
             if latest_credit:
                 credit_line = (
                     f"<b>Latest Credit Mail:</b>\n"
-                    f"  From: <code>{latest_credit.get('from', 'N/A')}</code>\n"
-                    f"  Amount: ₹{latest_credit.get('amount') or '?'} | UTR: <code>{latest_credit.get('utr') or 'N/A'}</code>\n\n"
+                    f"  From: <code>{html.escape(str(latest_credit.get('from', 'N/A')))}</code>\n"
+                    f"  Subject: {html.escape(str(latest_credit.get('subject', '')))}\n"
+                    f"  Amount: ₹{latest_credit.get('amount') or '?'} | UTR: <code>{html.escape(str(latest_credit.get('utr') or 'N/A'))}</code>\n\n"
                     f"{ce('success')} <b>Mail pipeline OK — payments verify ho sakte hain.</b>"
                 )
             else:
@@ -1658,7 +1660,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 
             summary = (
                 f"<blockquote><b>{ce('memo')} MAIL DIAGNOSTIC REPORT</b></blockquote>\n\n"
-                f"<b>Account:</b> <code>{d.get('email', 'N/A')}</code>\n"
+                f"<b>Account:</b> <code>{html.escape(str(d.get('email', 'N/A')))}</code>\n"
                 f"<b>Generated:</b> {d.get('generated_at_ist', '')}\n"
                 f"{get_line(12)}\n"
                 f"<b>Total Mails:</b>\n{folder_lines}\n\n"
