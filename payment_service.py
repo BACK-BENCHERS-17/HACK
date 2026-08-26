@@ -595,7 +595,7 @@ def _amount_matches(text: str, expected: float) -> bool:
             val = float(norm)
         except ValueError:
             continue
-        if abs(val - expected) < 1.0:
+        if abs(val - expected) < 0.01:
             return True
         if f"{val:.2f}" in targets:
             return True
@@ -695,9 +695,12 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
                 except Exception:
                     email_ts = 0.0
                 
+                # STRICT recency check: a credit email must have arrived at
+                # or after the moment the order was created (5-min tolerance
+                # for clock skew). Older emails must NEVER verify a newer
+                # order — otherwise yesterday's payment would verify today's.
                 if email_ts and email_ts > 0 and email_ts < min_email_ts:
-                    if email_ts < order_created_ts - 86400:
-                        continue
+                    continue
 
                 # Basic filter passed, fetch full body
                 typ, msg_data = m.fetch(msg_id_bytes, "(RFC822)")
@@ -735,6 +738,17 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
 
                 utr = (mu.group(1) if mu else "").strip()
                 txn = (mt.group(1) if mt else "").strip() or utr
+
+                # Many FamApp credit alerts carry NO UTR at all. Without a
+                # stable id, the SAME old email could verify several different
+                # orders. Derive a deterministic fingerprint from Message-Id /
+                # timestamp so each email can only ever be used once.
+                if not utr:
+                    fp_src = ((msg.get("Message-Id", "") or "").strip("<> ")
+                              or f"{subject}|{email_ts}")
+                    utr = "FP-" + hashlib.sha1(fp_src.encode()).hexdigest()[:12]
+                if not txn:
+                    txn = utr
                 sender_name = ""
                 if ms:
                     sender_name = ms.group(1).strip()
@@ -1350,14 +1364,15 @@ async def verify_payment(request: web.Request) -> web.Response:
 
     used_utrs = await asyncio.to_thread(_collect_utrs)
 
-    # ── Primary: fampay-verify module (automatic Gmail credit-alert matching) ──
+    # ── Primary: built-in IMAP scanner (strict order-time + amount matching) ──
+    # Note: fampay-verify runs as fallback only — its "async" API misuses the
+    # synchronous imap_tools MailBox (raises every call), so our scanner is
+    # the reliable path.
     order_amount = float(order["amount"])
-    match = await _fampay_verify_payment(
-        sess["email"], app_password, order_amount, used_utrs,
-    )
+    created_ts = float(order.get("created_at", time.time() - 600))
 
-    # ── Fallback: built-in IMAP scanner (order-id + amount matching) ──
-    if not match:
+    match = None
+    for attempt in range(3):
         loop = asyncio.get_running_loop()
         match = await loop.run_in_executor(
             None,
@@ -1366,12 +1381,31 @@ async def verify_payment(request: web.Request) -> web.Response:
             app_password,
             order_id,
             order_amount,
-            float(order.get("created_at", time.time() - 600)),
+            created_ts,
             used_utrs,
         )
+        if not match:
+            match = await _fampay_verify_payment(
+                sess["email"], app_password, order_amount, used_utrs,
+            )
+        if match:
+            break
+        if attempt < 2:
+            # Gmail IMAP indexing + FamApp credit-alert delivery can lag by
+            # seconds-to-minutes behind the actual payment. Poll instead of
+            # failing on the first try.
+            log.info(
+                "Payment for %s not found yet (attempt %d/3) — retrying in 6s",
+                order_id, attempt + 1,
+            )
+            await asyncio.sleep(6)
 
     if not match:
-        return _err("Payment not yet received.")
+        return _err(
+            "Payment not yet received. Credit alert mails can take 1–20 "
+            "minutes to arrive after you pay — please wait a bit and press "
+            "'I'VE PAID' again."
+        )
 
     utr = match["utr"]
     txn = match["transaction_id"]
