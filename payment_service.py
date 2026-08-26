@@ -47,6 +47,19 @@ from pymongo.errors import DuplicateKeyError
 from config import BOT_TOKEN, MONGO_DB_NAME, MONGO_URI
 from database import DatabaseManager
 
+# ── fampay-verify: automatic UPI payment verification via Gmail alerts ──
+try:
+    from fampay_verify import (
+        AsyncFamPayVerifier,
+        FamPayVerifierConfig,
+        VerifyPaymentParams,
+    )
+    _FAMPAY_VERIFY_OK = True
+except ImportError:
+    _FAMPAY_VERIFY_OK = False
+    log_fv = logging.getLogger("payment_svc.fampay")
+    log_fv.warning("fampay-verify not installed — falling back to built-in IMAP scanner.")
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────────────────────────────────────
@@ -994,6 +1007,48 @@ async def serve_qr(request: web.Request) -> web.Response:
                         headers={"Cache-Control": "no-store"})
 
 
+async def _fampay_verify_payment(email_addr: str, app_password: str,
+                                 amount: float,
+                                 used_utrs: Optional[set] = None) -> Optional[dict]:
+    """Primary verifier: uses the `fampay-verify` package to scan the admin's
+    Gmail inbox (IMAP) for a recent FamPay/UPI credit alert matching `amount`
+    (unique-decimal matching, 15-minute expiry built in).
+
+    Returns a match dict compatible with _imap_find_payment, or None.
+    """
+    if not _FAMPAY_VERIFY_OK:
+        return None
+    used_utrs = used_utrs or set()
+    try:
+        verifier = AsyncFamPayVerifier(FamPayVerifierConfig(
+            gmail=email_addr,
+            gmail_app_password=app_password,
+        ))
+        result = await verifier.verify_payment(VerifyPaymentParams(amount=amount))
+    except Exception as e:
+        log.error("fampay-verify request failed: %s", e)
+        return None
+
+    if not getattr(result, "verified", False):
+        log.info("fampay-verify: no payment yet (%s)", getattr(result, "message", "not verified"))
+        return None
+
+    utr = str(getattr(result, "utr", "") or "").strip()
+    txn = str(getattr(result, "transaction_id", "") or "").strip() or utr
+    if utr and utr in used_utrs:
+        log.warning("fampay-verify matched an already-used UTR (%s) — ignoring.", utr)
+        return None
+
+    log.info("fampay-verify MATCH: amount=%.2f utr=%s sender=%s",
+             amount, utr or "N/A", getattr(result, "sender_name", "Unknown"))
+    return {
+        "utr": utr or f"AUTO-{int(time.time())}",
+        "transaction_id": txn,
+        "sender_name": getattr(result, "sender_name", "Unknown") or "Unknown",
+        "payment_time_ist": getattr(result, "payment_time_ist", "") or "",
+    }
+
+
 async def verify_payment(request: web.Request) -> web.Response:
     token = _bearer_token(request)
     sess = await _get_session(token)
@@ -1053,17 +1108,25 @@ async def verify_payment(request: web.Request) -> web.Response:
 
     used_utrs = await asyncio.to_thread(_collect_utrs)
 
-    loop = asyncio.get_running_loop()
-    match = await loop.run_in_executor(
-        None,
-        _imap_find_payment,
-        sess["email"],
-        app_password,
-        order_id,
-        float(order["amount"]),
-        float(order.get("created_at", time.time() - 600)),
-        used_utrs,
+    # ── Primary: fampay-verify module (automatic Gmail credit-alert matching) ──
+    order_amount = float(order["amount"])
+    match = await _fampay_verify_payment(
+        sess["email"], app_password, order_amount, used_utrs,
     )
+
+    # ── Fallback: built-in IMAP scanner (order-id + amount matching) ──
+    if not match:
+        loop = asyncio.get_running_loop()
+        match = await loop.run_in_executor(
+            None,
+            _imap_find_payment,
+            sess["email"],
+            app_password,
+            order_id,
+            order_amount,
+            float(order.get("created_at", time.time() - 600)),
+            used_utrs,
+        )
 
     if not match:
         return _err("Payment not yet received.")

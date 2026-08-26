@@ -7,3 +7,4 @@ aiohttp
 cryptography
 qrcode[pil]
 tzlocal
+fampay-verify>=1.0.6
