@@ -1079,7 +1079,13 @@ async def verify_payment(request: web.Request) -> web.Response:
         if not order:
             return _err("Order not found.")
 
-    if time.time() > order.get("expires_at", 0) and order.get("status") != "PAID":
+    # Grace period: allow verification up to 1 hour after order creation,
+    # so users who pay just after the 5-minute QR display TTL aren't rejected.
+    verify_deadline = max(
+        float(order.get("expires_at") or 0),
+        float(order.get("created_at") or 0) + 3600,
+    )
+    if time.time() > verify_deadline and order.get("status") != "PAID":
         return _err("Order has expired.")
 
     if order.get("status") == "PAID":

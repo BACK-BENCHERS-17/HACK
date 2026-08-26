@@ -329,7 +329,7 @@ async def svc_verify_payment(svc_url: str, token: str, order_id: str, user_id: i
             if user_id:
                 payload["user_id"] = user_id
             async with session.post(f"{svc_url}/verify_payment", json=payload, headers=headers,
-                                    timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                                    timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status != 200:
                     return {"status": "error", "message": f"Service HTTP {resp.status}"}
                 return await resp.json()
@@ -926,10 +926,11 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode=ParseMode.HTML,
             )
 
-            # Schedule expiration job (5 minutes = 300 seconds)
+            # Schedule expiration job (10 minutes = 600 seconds).
+            # Verification itself stays possible for 1 hour (service-side grace).
             context.job_queue.run_once(
                 qr_expiration_job,
-                when=300,
+                when=600,
                 data={
                     "chat_id": user_id,
                     "message_id": msg.message_id,
@@ -1117,22 +1118,19 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     back_kb("user_main"),
                 )
             else:
-                # Not paid yet or other error
+                # Not paid yet or other error — DO NOT delete/re-edit the QR
+                # photo message. Show a popup alert instead so the QR stays
+                # visible and the user can tap "I'VE PAID" again.
                 msg = result.get("message", "UPI payments may take up to 2 minutes.")
                 if "not yet received" in msg.lower():
                     msg = "Please wait a moment and try again. UPI payments may take up to 2 minutes."
-                
-                buttons = [
-                    [InlineKeyboardButton("Try Again", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["refresh"][1], style="primary")],
-                    [InlineKeyboardButton("Back to Menu", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
-                ]
-                await safe_edit_text(
-                    update, context,
-                    f"<blockquote><b>{ce('fail')} Payment Not Received Yet</b></blockquote>\n\n"
-                    f"<i>{msg}</i>\n\n"
-                    f"<b>Order ID:</b> <code>{order_id}</code>",
-                    InlineKeyboardMarkup(buttons),
-                )
+                elif "expired" in msg.lower():
+                    msg = "This QR/order has expired. Please generate a new QR from the store."
+                alert = f"❌ Payment Not Received Yet\n\n{msg}\n\nOrder ID: {order_id}"[:200]
+                try:
+                    await query.answer(alert, show_alert=True)
+                except Exception:
+                    logger.warning("Could not show verify-failure alert: %s", order_id)
 
         # ── Downloads ─────────────────────────────────────────────────────────
         elif data == "user_downloads":
