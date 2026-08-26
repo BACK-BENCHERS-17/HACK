@@ -355,44 +355,13 @@ class DatabaseManager:
             return plan
         return await asyncio.to_thread(_op)
 
-    async def add_plan(self, prod_id: int, duration: str, price: int,
-                       api_pid: Optional[int] = None, api_duration: Optional[str] = None,
-                       api_android_id: str = ""):
-        """Create a plan.
-
-        Manual mode  : api_pid=None            -> keys delivered from local stock only.
-        API mode     : api_pid=<reseller PID>  -> when local stock runs out, key is bought
-                       automatically from the reseller panel (see reseller_api.py).
-                       api_duration must match the panel's exact duration string
-                       (e.g. '1 Day', '7 DaYs', '12 Hours').
-                       api_android_id is MANDATORY for device-bound products
-                       (e.g. BALA MOD XYZ V1); optional/not required for V2.
-        """
+    async def add_plan(self, prod_id: int, duration: str, price: int):
+        """Create a plan (manual mode only — keys delivered from local stock)."""
         _id = await self._next_id("plans")
         doc = {
             "_id": _id, "product_id": int(prod_id), "duration": duration, "price": int(price),
         }
-        if api_pid:
-            doc.update({"api_pid": int(api_pid), "api_duration": (api_duration or duration).strip(),
-                        "api_android_id": (api_android_id or "").strip()})
         await asyncio.to_thread(self.db.plans.insert_one, doc)
-
-    async def set_plan_api(self, plan_id: int, api_pid: Optional[int],
-                           api_duration: Optional[str] = None,
-                           api_android_id: str = ""):
-        """Attach / update / remove API mapping on an existing plan.
-        Pass api_pid=None to switch the plan back to manual-only mode.
-        """
-        if api_pid:
-            await asyncio.to_thread(self.db.plans.update_one, {"_id": int(plan_id)}, {"$set": {
-                "api_pid": int(api_pid),
-                "api_duration": (api_duration or "").strip(),
-                "api_android_id": (api_android_id or "").strip(),
-            }})
-        else:
-            await asyncio.to_thread(self.db.plans.update_one, {"_id": int(plan_id)}, {"$unset": {
-                "api_pid": "", "api_duration": "", "api_android_id": "",
-            }})
 
     async def delete_plan(self, plan_id: int):
         def _op():
@@ -480,59 +449,7 @@ class DatabaseManager:
             }
 
         ok, msg, info = await asyncio.to_thread(_op)
-        if ok:
-            return ok, msg, info
-
-        # ── Manual stock empty → auto-buy from reseller panel if plan has API mapping ──
-        plan = await asyncio.to_thread(self.db.plans.find_one, {"_id": int(plan_id)})
-        if not plan or not plan.get("api_pid"):
-            return ok, msg, {}
-
-        from reseller_api import buy_key
-        bought, key_or_err, _raw = await buy_key(
-            plan["api_pid"],
-            plan.get("api_duration") or plan["duration"],
-            plan.get("api_android_id") or None,
-        )
-        if not bought:
-            logger.warning("Reseller auto-buy failed for plan %s: %s", plan_id, key_or_err)
-            return False, f"Out of stock ({key_or_err})", {}
-
-        product = await asyncio.to_thread(self.db.products.find_one, {"_id": plan["product_id"]})
-        product_name = product["name"] if product else "Unknown"
-        days = 30
-        try:
-            digits = "".join(filter(str.isdigit, plan.get("api_duration") or plan["duration"]))
-            if digits: days = max(1, int(digits))
-        except Exception: pass
-        expiry_date = (datetime.now() + timedelta(days=days)).isoformat()
-        purchase_date = datetime.now().isoformat()
-
-        def _deliver():
-            next_k_doc = self.db.counters.find_one_and_update(
-                {"_id": "keys"}, {"$inc": {"seq": 1}},
-                upsert=True, return_document=ReturnDocument.AFTER
-            )
-            self.db.keys.insert_one({
-                "_id": next_k_doc["seq"], "plan_id": int(plan_id), "key_value": key_or_err,
-                "is_sold": 1, "sold_to": user_id, "purchase_date": purchase_date,
-                "expiry_date": expiry_date, "source": "reseller_api",
-            })
-            next_p_doc = self.db.counters.find_one_and_update(
-                {"_id": "purchases"}, {"$inc": {"seq": 1}},
-                upsert=True, return_document=ReturnDocument.AFTER
-            )
-            self.db.purchases.insert_one({
-                "_id": next_p_doc["seq"], "user_id": user_id, "plan_id": int(plan_id),
-                "key_id": next_k_doc["seq"], "amount": int(plan["price"]),
-                "purchase_date": purchase_date, "source": "reseller_api",
-            })
-        await asyncio.to_thread(_deliver)
-
-        return True, "Success", {
-            "key": key_or_err, "expiry": expiry_date,
-            "product": product_name, "duration": plan["duration"], "source": "reseller_api",
-        }
+        return ok, msg, info
 
     async def get_user_keys(self, user_id: int, offset: int = 0, limit: int = 5) -> List[dict]:
         def _op():

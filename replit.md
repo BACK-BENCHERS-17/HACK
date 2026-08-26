@@ -64,11 +64,9 @@ The following are loaded from environment with fallbacks already hardcoded in `c
 
 To override the defaults in production, set these as Replit Secrets before publishing.
 
-## Reseller Panel API (auto key buying)
-- `reseller_api.py` — async client for the upstream reseller panel (`adminpanels.shop/api/reseller_v1.php`).
-- Plans support **manual** mode (local `keys` stock) or **API** mode (`api_pid`, optional `api_duration`, optional `api_android_id` for device-bound products like BALA MOD XYZ V1).
-- `purchase_key_automated()` tries local stock first; if empty and the plan has an `api_pid`, it buys a key from the panel automatically and delivers it.
-- API URL / API Key / Master Key are owner-editable from the bot: **/admin → Settings → 🔌 Reseller API Config** (stored in the `settings` collection, falling back to env vars `RESELLER_API_URL`, `RESELLER_API_KEY`, `RESELLER_MASTER_KEY`).
+## Products & Plans (manual only)
+- Plans are **manual mode only**: keys are delivered from the local `keys` stock added by the admin (**/admin → Products → Add Keys**). There is no auto-buy / reseller panel API anymore.
+- If a plan runs out of stock, users simply see "Out of stock" until the admin adds more keys.
 
 ## Notes
 - The standalone PyPI packages `bson` and `telegram` (v0.0.1) must NOT be installed — they conflict with `pymongo`'s built-in `bson` module and `python-telegram-bot`'s `telegram` package. `requirements.txt` is curated to avoid them.

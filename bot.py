@@ -43,7 +43,7 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-from config import BOT_TOKEN, ADMIN_IDS, RESELLER_API_URL, RESELLER_API_KEY, RESELLER_MASTER_KEY
+from config import BOT_TOKEN, ADMIN_IDS
 from database import DatabaseManager
 
 # ==============================================================================
@@ -169,11 +169,7 @@ def get_line(n: int = 12) -> str:
     WAIT_FOR_ADD_FUND_AMT,
     # NEW: Staff states
     WAIT_FOR_ADD_STAFF, WAIT_FOR_REM_STAFF,
-    # NEW: Plan API-mode states
-    WAIT_FOR_PLAN_API_PID, WAIT_FOR_PLAN_API_DUR, WAIT_FOR_PLAN_API_AID,
-    # NEW: Reseller panel API config states (owner only)
-    WAIT_FOR_RAPI_URL, WAIT_FOR_RAPI_KEY, WAIT_FOR_RMASTER_KEY,
-) = range(43)
+) = range(37)
 
 
 # ==============================================================================
@@ -563,8 +559,8 @@ def _get_keypad_kb(current_val: str):
 def main_menu_kb(web_app_url: str = None) -> InlineKeyboardMarkup:
     buttons = []
     
-    # Add Web Store button if URL is provided
-    if web_app_url and web_app_url.startswith("http"):
+    # Add Web Store button if URL is provided (Telegram requires HTTPS for WebApp buttons)
+    if web_app_url and web_app_url.startswith("https://"):
         buttons.append([InlineKeyboardButton("OPEN WEB STORE", web_app=WebAppInfo(url=web_app_url), icon_custom_emoji_id=EMOJIS["rocket"][1], style="primary")])
 
     buttons.extend([
@@ -1500,7 +1496,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
     super_only = [
         "admin_products", "admin_keys", "admin_users", "admin_pending_payments",
         "admin_resellers", "admin_settings", "adm_maintenance", "admin_svc_session",
-        "adm_export_db", "admin_staff_list"
+        "adm_export_db", "admin_staff_list",
     ]
     
     if any(data.startswith(s) for s in super_only) and user_id not in ADMIN_IDS:
@@ -2012,7 +2008,6 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                     [InlineKeyboardButton("Edit QR Image", callback_data="adm_set_qr", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1]),
                      InlineKeyboardButton("Edit Insult Msg", callback_data="adm_set_msg", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1])],
                     [InlineKeyboardButton("Edit Download Channel", callback_data="adm_set_dl_link", style="primary", icon_custom_emoji_id=EMOJIS["link"][1])],
-                    [InlineKeyboardButton("🔌 Reseller API Config", callback_data="adm_rapi_cfg", style="primary", icon_custom_emoji_id=EMOJIS["key"][1])],
                     [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
                 ]
                 await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
@@ -2023,32 +2018,6 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                     f"<blockquote>{ce('fail')} Error loading settings. Check logs.</blockquote>",
                     back_kb("admin_main"),
                 )
-
-        elif data == "adm_rapi_cfg":
-            # Owner-only: reseller panel API configuration (auto key buying)
-            if update.effective_user.id not in ADMIN_IDS:
-                await query.answer("Owner only.", show_alert=True)
-                return
-            await query.answer()
-            url = await db.get_setting("reseller_api_url", RESELLER_API_URL)
-            api_key = await db.get_setting("reseller_api_key", RESELLER_API_KEY)
-            master = await db.get_setting("reseller_master_key", RESELLER_MASTER_KEY)
-            mask = lambda s: (s[:6] + "…" + s[-4:]) if len(s) > 12 else ("Set" if s else "Not Set")
-            text = (
-                f"<blockquote><b>🔌 RESELLER API CONFIG</b></blockquote>\n\n"
-                f"<code>API URL   : {url}\n"
-                f"API Key   : {mask(api_key)}\n"
-                f"Master Key: {mask(master)}</code>\n\n"
-                f"<i>Jab kisi plan me API PID set hoga aur manual stock khatam ho jayega, "
-                f"key automatically isi panel se buy hogi.</i>\n{get_line(12)}"
-            )
-            buttons = [
-                [InlineKeyboardButton("Edit API URL", callback_data="adm_rapi_url", style="primary", icon_custom_emoji_id=EMOJIS["link"][1]),
-                 InlineKeyboardButton("Edit API Key", callback_data="adm_rapi_key", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1])],
-                [InlineKeyboardButton("Edit Master Key", callback_data="adm_rapi_master", style="primary", icon_custom_emoji_id=EMOJIS["pencil"][1])],
-                [InlineKeyboardButton("Back to Settings", callback_data="admin_settings", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
-            ]
-            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
         elif data == "admin_faq":
             await query.answer()
@@ -2107,6 +2076,15 @@ async def cancel_conv_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await safe_edit_text(update, context, "<blockquote>Process Cancelled.</blockquote>", main_menu_kb())
     context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def admin_nav_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ends a stale/pending admin conversation when the owner taps any admin
+    navigation button, then re-dispatches the tap to the admin router so the
+    button works on the first press instead of being swallowed."""
+    context.user_data.clear()
+    await handle_admin_callbacks(update, context)
     return ConversationHandler.END
 
 
@@ -2822,9 +2800,8 @@ async def _finish_plan_add(update: Update, context: ContextTypes.DEFAULT_TYPE, m
     )
     buttons = []
     for pl in plans:
-        api_tag = " [API]" if pl.get("api_pid") else ""
         buttons.append([InlineKeyboardButton(
-            f"{pl['duration']} — ₹{pl['price']/100:.2f}{api_tag}",
+            f"{pl['duration']} — ₹{pl['price']/100:.2f}",
             callback_data=f"adm_plan_del_{pl['id']}",
             icon_custom_emoji_id=EMOJIS["fail"][1],
             style="danger"
@@ -2841,61 +2818,10 @@ async def receive_plan_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         await update.message.reply_text("Invalid Price. Send a number (e.g. 150):", reply_markup=cancel_kb())
         return WAIT_FOR_PLAN_PRICE
-    await update.message.reply_text(
-        "<blockquote>🔌 Send the <b>Reseller Panel API PID</b> for auto-buy (e.g. 133),\n"
-        "or send <b>/skip</b> for manual keys only:</blockquote>",
-        reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
-    )
-    return WAIT_FOR_PLAN_API_PID
-
-
-async def receive_plan_apipid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = update.message.text.strip()
+    # ── Manual mode: plan saved directly, keys delivered from local stock ──
     prod_id = context.user_data.get("add_plan_pid")
-    if raw.lower() in ("/skip", "skip"):
-        # ── MANUAL mode: local stock only ──
-        await db.add_plan(prod_id, context.user_data.get("add_plan_dur", ""), context.user_data.pop("add_plan_price", 0))
-        await _finish_plan_add(update, context, "Manual")
-        context.user_data.clear()
-        return ConversationHandler.END
-    if not raw.isdigit():
-        await update.message.reply_text("Invalid PID. Send a numeric PID or /skip:", reply_markup=cancel_kb())
-        return WAIT_FOR_PLAN_API_PID
-    context.user_data["add_plan_api_pid"] = int(raw)
-    await update.message.reply_text(
-        "<blockquote>⏱ Send the panel's <b>exact duration string</b> for this PID\n"
-        "(e.g. 1 Day / 7 DaYs / 12 Hours), or /skip to reuse the plan duration:</blockquote>",
-        reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
-    )
-    return WAIT_FOR_PLAN_API_DUR
-
-
-async def receive_plan_apidur(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = update.message.text.strip()
-    if raw.lower() in ("/skip", "skip"):
-        raw = context.user_data.get("add_plan_dur", "")
-    context.user_data["add_plan_api_dur"] = raw
-    await update.message.reply_text(
-        "<blockquote>📱 Send the <b>Android ID</b> if this product is device-bound\n"
-        "(MANDATORY for BALA MOD XYZ V1), or /skip if not required (e.g. V2):</blockquote>",
-        reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
-    )
-    return WAIT_FOR_PLAN_API_AID
-
-
-async def receive_plan_aid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = update.message.text.strip()
-    android_id = "" if raw.lower() in ("/skip", "skip") else raw
-    prod_id = context.user_data.get("add_plan_pid")
-    await db.add_plan(
-        prod_id,
-        context.user_data.get("add_plan_dur", ""),
-        context.user_data.pop("add_plan_price", 0),
-        api_pid=context.user_data.get("add_plan_api_pid"),
-        api_duration=context.user_data.get("add_plan_api_dur"),
-        api_android_id=android_id,
-    )
-    await _finish_plan_add(update, context, f"API pid={context.user_data.get('add_plan_api_pid')}")
+    await db.add_plan(prod_id, context.user_data.get("add_plan_dur", ""), context.user_data.pop("add_plan_price", 0))
+    await _finish_plan_add(update, context, "Manual")
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -3219,92 +3145,6 @@ async def receive_set_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── Reseller panel API config (owner only) ────────────────────────────────────
-def _rapi_owner_guard(update: Update) -> bool:
-    if update.effective_user.id in ADMIN_IDS:
-        return True
-    update.effective_message.reply_text("⛔ Owner only.")
-    return False
-
-
-@verification_required
-async def prompt_rapi_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    if not _rapi_owner_guard(update): return ConversationHandler.END
-    await safe_edit_text(
-        update, context,
-        "<blockquote>🌐 Send the <b>Reseller API URL</b>\n"
-        "(default: https://adminpanels.shop/api/reseller_v1.php):</blockquote>",
-        cancel_kb(), parse_mode=ParseMode.HTML,
-    )
-    return WAIT_FOR_RAPI_URL
-
-
-async def receive_rapi_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-    await db.set_setting("reseller_api_url", url)
-    await db.log_admin_action(update.effective_user.id, "Reseller API URL Updated", url)
-    await update.message.reply_text(
-        f"<blockquote>{ce('success')} <b>Reseller API URL updated!</b></blockquote>",
-        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
-    )
-    return ConversationHandler.END
-
-
-@verification_required
-async def prompt_rapi_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    if not _rapi_owner_guard(update): return ConversationHandler.END
-    await safe_edit_text(
-        update, context,
-        "<blockquote>🔑 Send the new <b>Reseller API Key</b>:</blockquote>",
-        cancel_kb(), parse_mode=ParseMode.HTML,
-    )
-    return WAIT_FOR_RAPI_KEY
-
-
-async def receive_rapi_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    key = update.message.text.strip()
-    await db.set_setting("reseller_api_key", key)
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-    await db.log_admin_action(update.effective_user.id, "Reseller API Key Updated", "(hidden)")
-    await update.message.reply_text(
-        f"<blockquote>{ce('success')} <b>Reseller API Key updated!</b></blockquote>",
-        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
-    )
-    return ConversationHandler.END
-
-
-@verification_required
-async def prompt_rapi_master(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    if not _rapi_owner_guard(update): return ConversationHandler.END
-    await safe_edit_text(
-        update, context,
-        "<blockquote>🗝 Send the new <b>x-master-key</b> header value:</blockquote>",
-        cancel_kb(), parse_mode=ParseMode.HTML,
-    )
-    return WAIT_FOR_RMASTER_KEY
-
-
-async def receive_rapi_master(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    key = update.message.text.strip()
-    await db.set_setting("reseller_master_key", key)
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-    await db.log_admin_action(update.effective_user.id, "Reseller Master Key Updated", "(hidden)")
-    await update.message.reply_text(
-        f"<blockquote>{ce('success')} <b>Master Key updated!</b></blockquote>",
-        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
-    )
-    return ConversationHandler.END
-
-
 @verification_required
 async def prompt_set_sup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -3487,10 +3327,6 @@ def main():
             CallbackQueryHandler(prompt_set_sup, pattern="^adm_set_sup$"),
             CallbackQueryHandler(prompt_set_msg, pattern="^adm_set_msg$"),
             CallbackQueryHandler(prompt_set_dl_link, pattern="^adm_set_dl_link$"),
-            # Reseller panel API config (owner only)
-            CallbackQueryHandler(prompt_rapi_url, pattern="^adm_rapi_url$"),
-            CallbackQueryHandler(prompt_rapi_key, pattern="^adm_rapi_key$"),
-            CallbackQueryHandler(prompt_rapi_master, pattern="^adm_rapi_master$"),
             # Users
             CallbackQueryHandler(prompt_ban, pattern="^adm_ban_usr$"),
             CallbackQueryHandler(prompt_unban, pattern="^adm_unban_usr$"),
@@ -3538,12 +3374,6 @@ def main():
             ],
             WAIT_FOR_PLAN_DUR:        [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_plan_dur)],
             WAIT_FOR_PLAN_PRICE:      [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_plan_price)],
-            WAIT_FOR_PLAN_API_PID:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_plan_apipid)],
-            WAIT_FOR_PLAN_API_DUR:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_plan_apidur)],
-            WAIT_FOR_PLAN_API_AID:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_plan_aid)],
-            WAIT_FOR_RAPI_URL:        [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_rapi_url)],
-            WAIT_FOR_RAPI_KEY:        [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_rapi_key)],
-            WAIT_FOR_RMASTER_KEY:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_rapi_master)],
             WAIT_FOR_ADD_KEYS:        [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_keys)],
             WAIT_FOR_ADMIN_TICKET_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ticket_reply)],
             WAIT_FOR_PROMO_CODE:      [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_promo_code)],
@@ -3559,7 +3389,10 @@ def main():
             WAIT_FOR_RESELLER_DISCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reseller_discount)],
 
         },
-        fallbacks=[CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$")],
+        fallbacks=[
+            CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$"),
+            CallbackQueryHandler(admin_nav_fallback, pattern="^(admin_|adm_)"),
+        ],
         per_message=False,
         allow_reentry=True,
     )
