@@ -853,6 +853,193 @@ async def test_mail_connection(request: web.Request) -> web.Response:
         return _err(f"Mail test failed: {str(e)}")
 
 
+def _extract_amount_str(text: str) -> str:
+    m = AMOUNT_RE.search(text)
+    return m.group(1) if m else ""
+
+
+MAIL_REPORT_SCAN_COUNT = 50  # how many latest mails to list per folder
+
+
+def _scan_mailbox_sync(email_addr: str, app_password: str) -> tuple[str, dict]:
+    """Blocking IMAP diagnostic scan. Returns (report_text, stats_dict).
+
+    The report lists total mails per folder, the latest N mails with sender /
+    subject / date, and deep-checks payment-sender mails for credit keywords,
+    amount and UTR so admins can confirm verification is working.
+    """
+    sep = "=" * 64
+    lines = [
+        sep,
+        "HACK STORE — PAYMENT MAIL DIAGNOSTIC REPORT",
+        f"Generated : {_now_ist_str()}",
+        f"Account   : {email_addr}",
+        sep,
+    ]
+    stats: dict = {"email": email_addr, "folders": {}, "payment_mails": [], "listed": 0}
+
+    try:
+        m = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        m.login(email_addr, app_password)
+        lines.append("IMAP Login : SUCCESS")
+    except Exception as e:
+        lines.append(f"IMAP Login : FAILED — {e}")
+        return "\n".join(lines), stats
+
+    folders_to_try = ["INBOX"]
+    all_mail = _find_folder_by_attribute(m, "\\All")
+    if all_mail and all_mail not in folders_to_try:
+        folders_to_try.append(all_mail)
+
+    try:
+        for folder in folders_to_try:
+            lines += ["", "-" * 64, f"FOLDER: {folder}", "-" * 64]
+            try:
+                typ, data = m.select(folder, readonly=True)
+            except Exception as e:
+                lines.append(f"  Could not open folder: {e}")
+                continue
+            if typ != "OK":
+                lines.append("  Could not open folder.")
+                continue
+            total = int(data[0]) if data and data[0] else 0
+            stats["folders"][folder] = total
+            lines.append(f"Total mails in folder : {total}")
+
+            typ, sdata = m.search(None, "ALL")
+            ids = sdata[0].split() if (typ == "OK" and sdata and sdata[0]) else []
+            recent = ids[-MAIL_REPORT_SCAN_COUNT:]
+            lines.append(f"Listing latest {len(recent)} mail(s) (newest first):")
+            lines.append("")
+
+            for pos, mid in enumerate(reversed(recent), start=1):
+                try:
+                    typ, fd = m.fetch(mid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+                    if typ != "OK" or not fd or not fd[0] or not isinstance(fd[0], tuple):
+                        continue
+                    hdr = email.message_from_bytes(fd[0][1])
+                    frm = _decode_header_str(hdr.get("From", ""))
+                    subj = _decode_header_str(hdr.get("Subject", ""))
+                    date = _decode_header_str(hdr.get("Date", ""))
+                except Exception as e:
+                    lines.append(f"{pos:>3}. <fetch error: {e}>")
+                    continue
+
+                sender_l = frm.lower()
+                flag = ""
+                if any(s in sender_l for s in PAYMENT_SENDERS):
+                    body = ""
+                    try:
+                        typ2, bd = m.fetch(mid, "(BODY.PEEK[TEXT])")
+                        if typ2 == "OK" and bd:
+                            for item in bd:
+                                if isinstance(item, tuple):
+                                    raw_txt = _decode_part(item[1], None)
+                                    raw_txt = re.sub(r"<[^>]+>", " ", raw_txt)
+                                    body += re.sub(r"\s+", " ", raw_txt)[:4000]
+                                    break
+                    except Exception:
+                        pass
+                    hay = subj + " " + body
+                    has_credit = any(kw in hay.lower() for kw in CREDIT_KEYWORDS)
+                    amt = _extract_amount_str(hay)
+                    mu = UTR_RE.search(subj + "\n" + body)
+                    utr = mu.group(1).strip() if mu else ""
+                    entry = {
+                        "folder": folder,
+                        "from": frm,
+                        "subject": subj[:120],
+                        "date": date,
+                        "credit": has_credit,
+                        "amount": amt,
+                        "utr": utr,
+                    }
+                    stats["payment_mails"].append(entry)
+                    flag = f"   << PAYMENT MAIL | CREDIT: {'YES' if has_credit else 'NO'}"
+                    if amt:
+                        flag += f" | Amount: Rs.{amt}"
+                    if utr:
+                        flag += f" | UTR: {utr}"
+
+                stats["listed"] += 1
+                lines.append(f"{pos:>3}. Date   : {date}")
+                lines.append(f"    From   : {frm}")
+                lines.append(f"    Subject: {subj}{flag}")
+
+        # ── Summary ──────────────────────────────────────────────────────────
+        pay = stats["payment_mails"]
+        credits = [p for p in pay if p["credit"]]
+        lines += ["", sep, "SUMMARY", sep]
+        for folder, total in stats["folders"].items():
+            lines.append(f"Total mails in {folder}: {total}")
+        lines.append(f"Payment-sender mails found (in last {stats['listed']} listed): {len(pay)}")
+        lines.append(f"Credit mails among them (verifiable): {len(credits)}")
+        if credits:
+            latest = credits[0]
+            lines += ["", "Latest credit mail detected:"]
+            lines.append(f"  From    : {latest['from']}")
+            lines.append(f"  Subject : {latest['subject']}")
+            lines.append(f"  Date    : {latest['date']}")
+            lines.append(f"  Amount  : {latest['amount'] or 'not detected'}")
+            lines.append(f"  UTR     : {latest['utr'] or 'not detected'}")
+            lines += ["", "STATUS: Mail pipeline looks OK — payments CAN be verified."]
+        else:
+            lines += [
+                "",
+                "WARNING: No credit mails found recently!",
+                "Payments will NOT auto-verify until FamPay/bank credit alert",
+                "mails arrive in this inbox. Check that alerts are enabled and",
+                "this Gmail receives transaction notifications.",
+            ]
+        lines += ["", sep, "END OF REPORT", sep]
+    finally:
+        try:
+            m.logout()
+        except Exception:
+            pass
+
+    return "\n".join(lines), stats
+
+
+async def mail_report(request: web.Request) -> web.Response:
+    """Diagnostic endpoint: full mailbox report for the logged-in Gmail.
+
+    Returns JSON with a plain-text report plus structured totals so the bot
+    can show a quick summary and send the report as a .txt document.
+    """
+    token = _bearer_token(request)
+    sess = await _get_session(token)
+    if not sess:
+        sess = await asyncio.to_thread(sessions_col.find_one, {}, sort=[("created_at", -1)])
+    if not sess:
+        return _err("No active session. Please login first.")
+
+    app_password = _dec(sess.get("app_password_enc", ""))
+    email_addr = sess.get("email", "")
+    if not app_password:
+        return _err("Stored credentials unreadable. Please login again.")
+
+    loop = asyncio.get_running_loop()
+    try:
+        report_text, stats = await loop.run_in_executor(
+            None, _scan_mailbox_sync, email_addr, app_password,
+        )
+    except Exception as e:
+        log.error("Mail report scan failed: %s", e)
+        return _err(f"Mail scan failed: {e}")
+
+    return _success({
+        "email": email_addr,
+        "folders": stats.get("folders", {}),
+        "listed": stats.get("listed", 0),
+        "payment_mails_count": len(stats.get("payment_mails", [])),
+        "credit_mails_count": sum(1 for p in stats.get("payment_mails", []) if p.get("credit")),
+        "latest_credit": next((p for p in stats.get("payment_mails", []) if p.get("credit")), None),
+        "generated_at_ist": _now_ist_str(),
+        "report": report_text,
+    })
+
+
 async def login(request: web.Request) -> web.Response:
     try:
         body = await request.json()
@@ -1227,6 +1414,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/user/keys", get_user_keys)
     app.router.add_get("/api/settings", get_global_settings)
     app.router.add_get("/api/test_mail", test_mail_connection)
+    app.router.add_get("/mail_report", mail_report)
 
     # Static files
     if os.path.exists("static"):

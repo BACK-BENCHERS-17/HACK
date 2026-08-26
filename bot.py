@@ -32,7 +32,7 @@ from telegram import (
     WebAppInfo,
 )
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Conflict, NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -330,6 +330,20 @@ async def svc_verify_payment(svc_url: str, token: str, order_id: str, user_id: i
                 payload["user_id"] = user_id
             async with session.post(f"{svc_url}/verify_payment", json=payload, headers=headers,
                                     timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                if resp.status != 200:
+                    return {"status": "error", "message": f"Service HTTP {resp.status}"}
+                return await resp.json()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+async def svc_mail_report(svc_url: str, token: str) -> dict:
+    """Call GET /mail_report on the payment microservice (mailbox diagnostic)."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            async with session.get(f"{svc_url}/mail_report", headers=headers,
+                                   timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status != 200:
                     return {"status": "error", "message": f"Service HTTP {resp.status}"}
                 return await resp.json()
@@ -1589,6 +1603,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             buttons = []
             if is_active:
                 buttons.append([InlineKeyboardButton("Re-Login", callback_data="adm_svc_login_start", style="primary", icon_custom_emoji_id=EMOJIS["refresh"][1])])
+                buttons.append([InlineKeyboardButton("Mail Report", callback_data="adm_svc_mail_report", style="primary", icon_custom_emoji_id=EMOJIS["memo"][1])])
                 buttons.append([InlineKeyboardButton("Logout", callback_data="adm_svc_logout", style="danger", icon_custom_emoji_id=EMOJIS["fail"][1])])
             else:
                 buttons.append([InlineKeyboardButton("Login to Service", callback_data="adm_svc_login_start", style="success", icon_custom_emoji_id=EMOJIS["success"][1])])
@@ -1605,7 +1620,69 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                 back_kb("admin_svc_session"),
             )
 
-        # ── Pending Payments Panel ─────────────────────────────────────────────
+        elif data == "adm_svc_mail_report":
+            await query.answer("Scanning mailbox… 30-60 seconds lag sakte hain", show_alert=False)
+            svc_url = await db.get_setting("payment_svc_url", "http://localhost:8000")
+            svc_token = await db.get_setting("payment_svc_token", "")
+            result = await svc_mail_report(svc_url, svc_token)
+
+            if result.get("status") != "success":
+                err = result.get("message", "Unknown error")
+                await safe_edit_text(
+                    update, context,
+                    f"<blockquote>{ce('fail')} <b>Mail report failed:</b> {err}\n\n"
+                    f"Check karo ki service login active hai.</blockquote>",
+                    back_kb("admin_svc_session"),
+                )
+                return
+
+            d = result.get("data", {})
+            folders = d.get("folders", {})
+            folder_lines = "\n".join(
+                f"  • <b>{name}:</b> {count} mails" for name, count in folders.items()
+            ) or "  • No folders scanned"
+            latest_credit = d.get("latest_credit")
+            credit_line = ""
+            if latest_credit:
+                credit_line = (
+                    f"<b>Latest Credit Mail:</b>\n"
+                    f"  From: <code>{latest_credit.get('from', 'N/A')}</code>\n"
+                    f"  Amount: ₹{latest_credit.get('amount') or '?'} | UTR: <code>{latest_credit.get('utr') or 'N/A'}</code>\n\n"
+                    f"{ce('success')} <b>Mail pipeline OK — payments verify ho sakte hain.</b>"
+                )
+            else:
+                credit_line = (
+                    f"{ce('warning')} <b>Koi credit mail nahi mila!</b>\n"
+                    f"<i>Jab tak FamPay/bank ke credit alert mails is inbox mein nahi aayenge, payment auto-verify NAHI hoga.</i>"
+                )
+
+            summary = (
+                f"<blockquote><b>{ce('memo')} MAIL DIAGNOSTIC REPORT</b></blockquote>\n\n"
+                f"<b>Account:</b> <code>{d.get('email', 'N/A')}</code>\n"
+                f"<b>Generated:</b> {d.get('generated_at_ist', '')}\n"
+                f"{get_line(12)}\n"
+                f"<b>Total Mails:</b>\n{folder_lines}\n\n"
+                f"<b>Listed (recent):</b> {d.get('listed', 0)}\n"
+                f"<b>Payment mails:</b> {d.get('payment_mails_count', 0)}\n"
+                f"<b>Credit mails:</b> {d.get('credit_mails_count', 0)}\n\n"
+                f"{credit_line}\n{get_line(12)}\n"
+                f"<i>Poora detailed report niche txt file mein hai 👇</i>"
+            )
+            report_text = d.get("report", "No report data.")
+            doc = io.BytesIO(report_text.encode("utf-8"))
+            doc.name = f"mail_report_{datetime.now().strftime('%d%m%Y_%H%M%S')}.txt"
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await context.bot.send_document(
+                chat_id=user_id,
+                document=doc,
+                caption=summary,
+                parse_mode=ParseMode.HTML,
+            )
+
+        # ── Pending Payments Panel ──────────────────────────────────────
         elif data == "admin_pending_payments":
             await query.answer()
             pending = await db.get_pending_fund_requests()
@@ -3429,12 +3506,32 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.error("FATAL ERROR DURING STARTUP:")
-        logger.error(traceback.format_exc())
-        # Force flush logs
-        import sys
-        sys.stderr.flush()
-        sys.stdout.flush()
+    # Retry-guard: during Render deploys the old instance can still be polling
+    # while the new one starts, causing a transient getUpdates Conflict.
+    # Retry with backoff instead of crashing; give up eventually so Render's
+    # own restart logic takes over if a real duplicate instance exists.
+    MAX_POLL_RETRIES = 6
+    retry_delay = 15
+    for attempt in range(1, MAX_POLL_RETRIES + 1):
+        try:
+            main()
+            break  # Clean shutdown — don't restart.
+        except Conflict:
+            logger.warning(
+                f"Conflict: another bot instance is polling this token "
+                f"(attempt {attempt}/{MAX_POLL_RETRIES}). Retrying in {retry_delay}s..."
+            )
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
+        except NetworkError as e:
+            logger.warning(f"NetworkError while polling: {e}. Retrying in {retry_delay}s...")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
+        except Exception:
+            logger.error("FATAL ERROR DURING STARTUP:")
+            logger.error(traceback.format_exc())
+            # Force flush logs
+            import sys
+            sys.stderr.flush()
+            sys.stdout.flush()
+            raise
