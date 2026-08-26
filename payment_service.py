@@ -354,6 +354,10 @@ def _imap_login_check(email_addr: str, app_password: str) -> tuple[bool, str]:
 PAYMENT_SENDERS = (
     "fampay",
     "fampay.in",
+    "famapp",
+    "famapp.in",
+    "no-reply@famapp.in",
+    "famx",
     "trans.alerts@fampay.in",
     "transactions@fampay.in",
     "noreply@fampay.in",
@@ -475,6 +479,28 @@ CREDIT_KEYWORDS = (
     "received ₹",
     "to your account",
     "amount received",
+)
+
+# Strong phrases that unambiguously mean money was RECEIVED.
+STRONG_CREDIT_KEYWORDS = (
+    "you received",
+    "received in your",
+    "added to your",
+    "money received",
+    "successfully credited",
+    "has been credited",
+)
+
+# Phrases found on OUTGOING/debit alerts (e.g. "Your payment of ₹X is
+# successful" means money LEFT the account). Such mails must never verify
+# an incoming payment unless a strong credit phrase is also present.
+DEBIT_EXCLUDE_KEYWORDS = (
+    "your payment of",
+    "you paid",
+    "you sent",
+    "debited",
+    "money sent",
+    "spent on",
 )
 
 UTR_RE = re.compile(r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?|Ref(?:\.?\s*No)?|Reference(?:\.?\s*No)?|Transaction\s*No)[:\s\-/]+([A-Za-z0-9]{8,})", re.I)
@@ -617,7 +643,9 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
         for folder in folders_to_try:
             log.info("Searching folder: %s for order=%s amount=%.2f", folder, order_id, amount)
             try:
-                m.select(folder, readonly=True)
+                # Mailbox names like [Gmail]/All Mail must be quoted for SELECT/EXAMINE.
+                quoted = folder if folder.startswith('"') else f'"{folder}"'
+                typ, data = m.select(quoted, readonly=True)
             except Exception:
                 continue
 
@@ -682,6 +710,11 @@ def _imap_find_payment(email_addr: str, app_password: str, order_id: str,
                 haystack = (subject + " " + body).lower()
 
                 if not any(kw in haystack for kw in CREDIT_KEYWORDS):
+                    continue
+                # Never match outgoing/debit alerts (e.g. FamApp "Your payment
+                # of ₹X is successful") — only genuine incoming credits.
+                if (any(kw in haystack for kw in DEBIT_EXCLUDE_KEYWORDS)
+                        and not any(kw in haystack for kw in STRONG_CREDIT_KEYWORDS)):
                     continue
 
                 unique_suffix = order_id[-8:].lower()
@@ -895,7 +928,9 @@ def _scan_mailbox_sync(email_addr: str, app_password: str) -> tuple[str, dict]:
         for folder in folders_to_try:
             lines += ["", "-" * 64, f"FOLDER: {folder}", "-" * 64]
             try:
-                typ, data = m.select(folder, readonly=True)
+                # Mailbox names like [Gmail]/All Mail must be quoted for SELECT.
+                quoted = folder if folder.startswith('"') else f'"{folder}"'
+                typ, data = m.select(quoted, readonly=True)
             except Exception as e:
                 lines.append(f"  Could not open folder: {e}")
                 continue
@@ -941,7 +976,18 @@ def _scan_mailbox_sync(email_addr: str, app_password: str) -> tuple[str, dict]:
                     except Exception:
                         pass
                     hay = subj + " " + body
-                    has_credit = any(kw in hay.lower() for kw in CREDIT_KEYWORDS)
+                    hay_l = hay.lower()
+                    has_credit = (
+                        any(kw in hay_l for kw in CREDIT_KEYWORDS)
+                        and not (
+                            any(kw in hay_l for kw in DEBIT_EXCLUDE_KEYWORDS)
+                            and not any(kw in hay_l for kw in STRONG_CREDIT_KEYWORDS)
+                        )
+                    )
+                    is_debit = (
+                        any(kw in hay_l for kw in DEBIT_EXCLUDE_KEYWORDS)
+                        and not has_credit
+                    )
                     amt = _extract_amount_str(hay)
                     mu = UTR_RE.search(subj + "\n" + body)
                     utr = mu.group(1).strip() if mu else ""
@@ -955,7 +1001,10 @@ def _scan_mailbox_sync(email_addr: str, app_password: str) -> tuple[str, dict]:
                         "utr": utr,
                     }
                     stats["payment_mails"].append(entry)
-                    flag = f"   << PAYMENT MAIL | CREDIT: {'YES' if has_credit else 'NO'}"
+                    if is_debit:
+                        flag = "   << PAYMENT MAIL | DEBIT (skipped — outgoing payment)"
+                    else:
+                        flag = f"   << PAYMENT MAIL | CREDIT: {'YES' if has_credit else 'NO'}"
                     if amt:
                         flag += f" | Amount: Rs.{amt}"
                     if utr:
