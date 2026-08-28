@@ -3,8 +3,6 @@ apscheduler
 pymongo[srv]
 dnspython
 python-dotenv
-aiohttp
-cryptography
 qrcode[pil]
 Pillow
 tzlocal

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Hack Store Telegram Bot — MongoDB + Render edition.
-Payment: Self-hosted UPI microservice (aiohttp).
+Payment: FamPay SDK (PaymentManager) for UPI QR + Gmail IMAP verification.
 """
 
 import asyncio
@@ -19,8 +19,6 @@ import uuid
 import warnings
 from datetime import datetime, timedelta
 from urllib.parse import quote
-
-import aiohttp
 
 from telegram import (
     Update,
@@ -194,17 +192,10 @@ def get_line(n: int = 12) -> str:
     WAIT_FOR_MANUAL_BAL_USER, WAIT_FOR_MANUAL_BAL_AMT, WAIT_FOR_PROMO_CODE, WAIT_FOR_PROMO_REWARD,
     WAIT_FOR_PROMO_USES, WAIT_FOR_USER_PROMO, WAIT_FOR_FAQ, WAIT_FOR_TOS,
     WAIT_FOR_EDIT_PROD_DESC, WAIT_FOR_PROD_LINK, WAIT_FOR_HOW_TO_TEXT, WAIT_FOR_HOW_TO_VIDEO,
-    # NEW: Payment service login states
-    WAIT_FOR_SVC_MOBILE, WAIT_FOR_SVC_EMAIL, WAIT_FOR_SVC_OTP,
-    # NEW: Microservice URL setting
-    WAIT_FOR_SVC_URL,
-    # NEW: Reseller states
     WAIT_FOR_RESELLER_USER, WAIT_FOR_RESELLER_DAYS, WAIT_FOR_RESELLER_DISCOUNT,
-    # NEW: Add fund state
     WAIT_FOR_ADD_FUND_AMT,
-    # NEW: Staff states
     WAIT_FOR_ADD_STAFF, WAIT_FOR_REM_STAFF,
-) = range(37)
+) = range(33)
 
 
 # ==============================================================================
@@ -214,7 +205,7 @@ db = DatabaseManager()
 
 DEFAULT_SETTINGS = {
     "qr_image": None,
-    "upi_id": "admin@upi",
+    "upi_id": "",
     "support_user": "@YourSupportHandle",
     "unauth_msg": (
         f"<blockquote><b>{ce('angry')} Aukaat mein reh! {ce('fail')}</b></blockquote>\n\n"
@@ -231,21 +222,10 @@ DEFAULT_SETTINGS = {
         f"<i>Learn how to purchase, download, and use our premium tools.</i>"
     ),
     "how_to_video": "https://t.me/YOUR_VIDEO_LINK_HERE",
-    # NEW: Payment microservice settings
-    "payment_svc_url": f"http://localhost:{os.environ.get('PORT') or os.environ.get('PAY_SVC_PORT') or '8000'}",
-    "payment_svc_token": "",       # session token from /login
-    "payment_svc_mobile": "",      # stored for re-login display
-    "payment_svc_email": "",       # stored for re-login display
 }
-# Auto-fix for Render users who have http://localhost:8000 stored but the service is on a different port.
+
 async def post_init(application: Application):
     await db.seed_default_settings(DEFAULT_SETTINGS)
-    _stored_url = await db.get_setting("payment_svc_url")
-    _env_port = os.environ.get('PORT') or os.environ.get('PAY_SVC_PORT')
-    if _env_port and _env_port != "8000" and _stored_url == "http://localhost:8000":
-        _new_url = f"http://localhost:{_env_port}"
-        logger.info(f"Auto-updating payment_svc_url: {_stored_url} -> {_new_url} (PORT={_env_port})")
-        await db.set_setting("payment_svc_url", _new_url)
 
 # ==============================================================================
 # 4. PRESET PRODUCT DESCRIPTIONS
@@ -324,68 +304,6 @@ def get_preset_desc(preset_id: str) -> str:
 # ==============================================================================
 # 5. PAYMENT MICROSERVICE CLIENT
 # ==============================================================================
-async def svc_login(svc_url: str, admin_id: int, mobile: str, email: str, otp: str) -> dict:
-    """Call POST /login on the payment microservice."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            payload = {"admin_id": admin_id, "mobile": mobile, "email": email, "otp": otp}
-            async with session.post(f"{svc_url}/login", json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                return await resp.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-async def svc_generate_qr(svc_url: str, token: str, amount: float,
-                          order_id: str, upi_id: str, plan_id: int = None, payee_name: str = "Hack Store") -> dict:
-    """Call POST /generate_qr on the payment microservice."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {"Authorization": f"Bearer {token}"}
-            payload = {
-                "amount": amount,
-                "order_id": order_id,
-                "upi_id": upi_id,
-                "plan_id": plan_id,
-                "payee_name": payee_name,
-            }
-            async with session.post(f"{svc_url}/generate_qr", json=payload, headers=headers,
-                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                return await resp.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-async def svc_verify_payment(svc_url: str, token: str, order_id: str, user_id: int = None) -> dict:
-    """Call POST /verify_payment on the payment microservice."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {"Authorization": f"Bearer {token}"}
-            payload = {"order_id": order_id}
-            if user_id:
-                payload["user_id"] = user_id
-            async with session.post(f"{svc_url}/verify_payment", json=payload, headers=headers,
-                                    timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                if resp.status != 200:
-                    return {"status": "error", "message": f"Service HTTP {resp.status}"}
-                return await resp.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-async def svc_mail_report(svc_url: str, token: str) -> dict:
-    """Call GET /mail_report on the payment microservice (mailbox diagnostic)."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {"Authorization": f"Bearer {token}"} if token else {}
-            async with session.get(f"{svc_url}/mail_report", headers=headers,
-                                   timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                if resp.status != 200:
-                    return {"status": "error", "message": f"Service HTTP {resp.status}"}
-                return await resp.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
 def generate_order_id(plan_id: int, user_id: int) -> str:
     """Generate a unique order ID."""
     unique = uuid.uuid4().hex[:8].upper()
@@ -563,8 +481,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await db.get_user(user_id)
     bal = user.get("balance", 0) / 100
     welcome_text = _welcome_text(bal)
-    svc_url = await db.get_setting("payment_svc_url", "")
-    await update.message.reply_text(welcome_text, reply_markup=main_menu_kb(svc_url), parse_mode=ParseMode.HTML)
+    await update.message.reply_text(welcome_text, reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
 
 
 def _welcome_text(bal: float) -> str:
@@ -668,7 +585,6 @@ async def admin_menu_kb(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("Maintenance", callback_data="adm_maintenance", icon_custom_emoji_id=EMOJIS["tools"][1], style="primary")
         ])
         buttons.append([
-            InlineKeyboardButton("UPI Session", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["session"][1], style="primary"),
             InlineKeyboardButton("Backup DB", callback_data="adm_export_db", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary")
         ])
     
@@ -776,8 +692,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     bal = user_data.get("balance", 0) / 100
-    svc_url = await db.get_setting("payment_svc_url", "")
-    await update.message.reply_text(_welcome_text(bal), reply_markup=main_menu_kb(svc_url), parse_mode=ParseMode.HTML)
+    await update.message.reply_text(_welcome_text(bal), reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
 
 
 @verification_required
@@ -792,8 +707,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer()
             user_data = await db.get_user(user_id)
             bal = user_data.get("balance", 0) / 100
-            svc_url = await db.get_setting("payment_svc_url", "")
-            await safe_edit_text(update, context, _welcome_text(bal), main_menu_kb(svc_url))
+            await safe_edit_text(update, context, _welcome_text(bal), main_menu_kb())
 
         # ── Buy Hack ───────────────────────────────────────────────────────────
         elif data == "user_buy_hack":
@@ -973,69 +887,6 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     logger.error(f"PaymentManager create failed, falling back to microservice: {pm_err}")
                     # Fall through to microservice fallback below
 
-            # ── Fallback: legacy microservice ──────────────────────────────────
-            svc_url   = await db.get_setting("payment_svc_url", "http://localhost:8000")
-            svc_token = await db.get_setting("payment_svc_token", "")
-
-            order_id = generate_order_id(plan_id, user_id)
-            await db.create_fund_request_with_order(user_id, order_id, plan_id, price_paise)
-
-            result = await svc_generate_qr(svc_url, svc_token, price_inr, order_id, admin_upi, plan_id=plan_id, payee_name=payee)
-
-            if result.get("status") != "success":
-                err = result.get("message", "Unknown error")
-                await safe_edit_text(
-                    update, context,
-                    f"<blockquote>{ce('fail')} <b>QR generation failed:</b> {err}\n\n"
-                    f"Please contact support.</blockquote>",
-                    back_kb("user_buy_hack"),
-                )
-                return
-
-            qr_data    = result["data"]
-            qr_url     = qr_data.get("qr_url", "")
-            qr_b64     = qr_data.get("qr_b64", "")
-            expires_at = qr_data.get("expires_at_ist", "5 minutes")
-
-            try:
-                import base64 as _b64
-                qr_photo = io.BytesIO(_b64.b64decode(qr_b64)) if qr_b64 else qr_url
-                if isinstance(qr_photo, io.BytesIO):
-                    qr_photo.name = f"{order_id}.png"
-            except Exception:
-                qr_photo = qr_url
-
-            caption = (
-                f"<blockquote><b>{ce('card')} SCAN &amp; PAY ₹{price_inr:.2f}</b></blockquote>\n\n"
-                f"<b>{ce('1')} Scan the QR code below with any UPI app.</b>\n"
-                f"<b>{ce('2')} Pay exactly ₹{price_inr:.2f}.</b>\n"
-                f"<b>{ce('3')} After payment, click <u>I'VE PAID</u> below.</b>\n\n"
-                f"<i>{ce('warning')} QR expires at: <b>{expires_at}</b></i>\n"
-                f"<i>{ce('success')} Key will be delivered automatically after verification.</i>\n\n"
-                f"<code>Order ID: {order_id}</code>"
-            )
-            buttons = [
-                [InlineKeyboardButton("I'VE PAID", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["success"][1], style="success")],
-                [InlineKeyboardButton("Generate New QR", callback_data=f"gen_qr_{plan_id}", icon_custom_emoji_id=EMOJIS["refresh"][1], style="primary")],
-                [InlineKeyboardButton("Cancel", callback_data=f"buy_plan_{plan_id}", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
-            ]
-            try:
-                await query.message.delete()
-            except Exception:
-                pass
-            msg = await context.bot.send_photo(
-                chat_id=user_id,
-                photo=qr_photo,
-                caption=caption,
-                reply_markup=InlineKeyboardMarkup(buttons),
-                parse_mode=ParseMode.HTML,
-            )
-
-            context.job_queue.run_once(
-                qr_expiration_job,
-                when=600,
-                data={"chat_id": user_id, "message_id": msg.message_id, "order_id": order_id},
-            )
 
         # ── Verify payment (user clicks I'VE PAID) ────────────────────────────
         elif data.startswith("verify_pay_"):
@@ -1117,9 +968,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                             )
                             try: await query.message.delete()
                             except Exception: pass
-                            svc_url = await db.get_setting("payment_svc_url", "")
                             await context.bot.send_message(chat_id=user_id, text=key_text,
-                                reply_markup=main_menu_kb(svc_url), parse_mode=ParseMode.HTML)
+                                reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
 
                             user_obj = await db.get_user(user_id)
                             uname = (user_obj.get("username") or "").lstrip("@")
@@ -1168,196 +1018,6 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     logger.error(f"PM verify failed, falling back to microservice: {pm_err}")
                     # Fall through to microservice fallback
 
-            # ── Fallback: legacy microservice ──────────────────────────────────
-            svc_url   = await db.get_setting("payment_svc_url", "http://localhost:8000")
-            svc_token = await db.get_setting("payment_svc_token", "")
-
-            logger.info(f"User {user_id} clicking I'VE PAID for order={order_id}. Calling {svc_url}/verify_payment")
-            result = await svc_verify_payment(svc_url, svc_token, order_id, user_id)
-            logger.info(f"Verification result for order={order_id}: {result.get('status')} - {result.get('message', 'N/A')}")
-
-            if result.get("status") == "success":
-                pay_data = result["data"]
-                utr = pay_data.get("utr", "N/A")
-                txn_id = pay_data.get("transaction_id", "N/A")
-                sender_name = pay_data.get("sender_name", "Unknown")
-                paid_amount = pay_data.get("amount", 0)
-                payment_time = pay_data.get("payment_time_ist", "")
-                upi_id_paid = pay_data.get("upi_id", "")
-
-                # Get fund_request to find plan_id
-                req = await db.get_fund_request_by_order(order_id)
-                if not req:
-                    await query.answer("Order not found. Contact support.", show_alert=True)
-                    return
-
-                # Anti-replay: if this UTR is already attached to a different
-                # order in our own DB, refuse delivery and alert admins.
-                if utr and utr != "N/A" and await db.is_utr_already_used(utr, except_order_id=order_id):
-                    await db.update_fund_request_by_order(order_id, "REJECTED_DUPLICATE_UTR",
-                                                   utr=utr, transaction_id=txn_id,
-                                                   sender_name=sender_name,
-                                                   payment_time=payment_time)
-                    await safe_edit_text(
-                        update, context,
-                        f"<blockquote>{ce('fail')} <b>This payment reference (UTR) "
-                        f"has already been used to claim a key.</b>\n\n"
-                        f"Each payment can be used only once. If this is a "
-                        f"genuine new payment, please contact support with the "
-                        f"order ID below.\n\n<code>{order_id}</code></blockquote>",
-                        back_kb("user_main"),
-                    )
-                    # Loud alert to admins about replay attempt
-                    user_obj = await db.get_user(user_id)
-                    uname = (user_obj.get("username") or "").lstrip("@")
-                    fname = user_obj.get("first_name") or ""
-                    await notify_admins(context, (
-                        f"<blockquote><b>{ce('siren')} UTR REPLAY BLOCKED</b></blockquote>\n"
-                        f"<b>User:</b> <code>{user_id}</code> ({fname} @{uname})\n"
-                        f"<b>Order:</b> <code>{order_id}</code>\n"
-                        f"<b>Tried UTR:</b> <code>{utr}</code>\n"
-                        f"<b>Txn:</b> <code>{txn_id}</code>\n"
-                        f"<b>Sender:</b> {html.escape(str(sender_name))}\n"
-                        f"<i>This UTR was already used by another order. No key was delivered.</i>"
-                    ))
-                    return
-
-                # If it's a balance top-up (FUND order), handle it and return
-                if order_id.startswith("FUND"):
-                    await db.update_fund_request_by_order(order_id, "APPROVED",
-                                                   utr=utr, transaction_id=txn_id,
-                                                   sender_name=sender_name,
-                                                   payment_time=payment_time)
-                    await safe_edit_text(
-                        update, context,
-                        f"<blockquote>{ce('success')} <b>FUNDS ADDED SUCCESSFULLY!</b></blockquote>\n\n"
-                        f"₹{paid_amount:.2f} has been added to your wallet.\n"
-                        f"<b>New Balance:</b> ₹{((await db.get_user(user_id)).get('balance', 0)/100):.2f}\n\n"
-                        f"<i>You can now use this balance to buy any hack.</i>",
-                        main_menu_kb()
-                    )
-                    return
-
-                # If key was already delivered by the microservice, use it
-                if pay_data.get("delivered_key"):
-                    info = {
-                        "key": pay_data.get("delivered_key"),
-                        "product": pay_data.get("product_info", "Premium Hack").split(" - ")[0],
-                        "duration": pay_data.get("product_info", "N/A").split(" - ")[-1],
-                        "expiry": (datetime.now() + timedelta(days=30)).isoformat() # Fallback expiry
-                    }
-                    success = True
-                else:
-                    # Deliver key automatically via bot logic
-                    success, msg, info = await db.purchase_key_automated(user_id, req["plan_id"])
-
-                if success:
-                    await db.update_fund_request_by_order(
-                        order_id, "APPROVED",
-                        utr=utr, transaction_id=txn_id,
-                        sender_name=sender_name, payment_time=payment_time,
-                        key_value=info.get("key"),
-                    )
-
-                    key_text = (
-                        f"<blockquote><b>{ce('success')} PAYMENT VERIFIED! {ce('star')}</b></blockquote>\n\n"
-                        f"<b>Transaction ID:</b> <code>{txn_id}</code>\n"
-                        f"<b>UTR:</b> <code>{utr}</code>\n"
-                        f"{get_line(12)}\n"
-                        f"<b>Product:</b> {info['product']}\n"
-                        f"<b>Duration:</b> {info['duration']}\n"
-                        f"<b>Expiry:</b> {info['expiry'][:10]}\n\n"
-                        f"<blockquote><b>{ce('key')} YOUR PREMIUM KEY:</b></blockquote>\n"
-                        f"<code>{info['key']}</code>\n\n"
-                        f"<i>Thank you for your purchase! Enjoy! {ce('fire')}</i>"
-                    )
-                    try:
-                        await query.message.delete()
-                    except Exception:
-                        pass
-                    svc_url = await db.get_setting("payment_svc_url", "")
-                    await context.bot.send_message(
-                        chat_id=user_id, text=key_text,
-                        reply_markup=main_menu_kb(svc_url), parse_mode=ParseMode.HTML,
-                    )
-
-                    # Detailed admin notification
-                    user_obj = await db.get_user(user_id)
-                    uname = (user_obj.get("username") or "").lstrip("@")
-                    fname = user_obj.get("first_name") or ""
-                    plan_obj = await db.get_plan(req["plan_id"]) or {}
-                    expected_amount = plan_obj.get("price", paid_amount)
-                    await notify_admins(context, (
-                        f"<blockquote><b>{ce('success')} AUTO PAYMENT SUCCESS — KEY DELIVERED</b></blockquote>\n"
-                        f"{get_line(12)}\n"
-                        f"<b>{ce('user')} User:</b> <code>{user_id}</code> ({fname} @{uname})\n"
-                        f"<b>{ce('card')} Order:</b> <code>{order_id}</code>\n"
-                        f"<b>{ce('money')} Amount:</b> ₹{expected_amount}\n"
-                        f"<b>{ce('bag')} Product:</b> {info['product']} — {info['duration']}\n"
-                        f"{get_line(12)}\n"
-                        f"<b>UTR:</b> <code>{utr}</code>\n"
-                        f"<b>Txn ID:</b> <code>{txn_id}</code>\n"
-                        f"<b>Sender:</b> {html.escape(str(sender_name))}\n"
-                        f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
-                        f"<b>Payment Time:</b> {payment_time}\n"
-                        f"{get_line(12)}\n"
-                        f"<b>{ce('key')} Delivered Key:</b>\n<code>{info['key']}</code>\n"
-                        f"<b>{ce('time')} Expiry:</b> {info['expiry'][:10]}"
-                    ))
-                else:
-                    # Payment verified but key delivery failed (out of stock etc.)
-                    await db.update_fund_request_by_order(
-                        order_id, "PAID_NO_STOCK",
-                        utr=utr, transaction_id=txn_id,
-                        sender_name=sender_name, payment_time=payment_time,
-                    )
-                    await safe_edit_text(
-                        update, context,
-                        f"<blockquote>{ce('warning')} <b>Payment received but key delivery failed: {msg}</b>\n\n"
-                        f"Please contact support with your Order ID:\n<code>{order_id}</code></blockquote>",
-                        back_kb("user_main"),
-                    )
-                    # Urgent admin alert — money received, no key delivered
-                    user_obj = await db.get_user(user_id)
-                    uname = (user_obj.get("username") or "").lstrip("@")
-                    fname = user_obj.get("first_name") or ""
-                    await notify_admins(context, (
-                        f"<blockquote><b>{ce('siren')} PAYMENT RECEIVED — DELIVERY FAILED</b></blockquote>\n"
-                        f"<b>Reason:</b> {msg}\n"
-                        f"{get_line(12)}\n"
-                        f"<b>User:</b> <code>{user_id}</code> ({fname} @{uname})\n"
-                        f"<b>Order:</b> <code>{order_id}</code>\n"
-                        f"<b>Amount:</b> ₹{paid_amount}\n"
-                        f"<b>UTR:</b> <code>{utr}</code>\n"
-                        f"<b>Txn:</b> <code>{txn_id}</code>\n"
-                        f"<b>Sender:</b> {html.escape(str(sender_name))}\n"
-                        f"<b>Paid To UPI:</b> <code>{upi_id_paid}</code>\n"
-                        f"<b>Time:</b> {payment_time}\n"
-                        f"<i>Please refund or top-up stock and deliver manually.</i>"
-                    ))
-            elif "already been used" in (result.get("message") or "").lower():
-                # Service-side replay rejection
-                await safe_edit_text(
-                    update, context,
-                    f"<blockquote>{ce('fail')} <b>This payment reference has "
-                    f"already been used.</b>\n\nPlease make a fresh payment "
-                    f"to claim a new key.\n\n<b>Order:</b> <code>{order_id}</code></blockquote>",
-                    back_kb("user_main"),
-                )
-            else:
-                # Not paid yet or other error — DO NOT delete/re-edit the QR
-                # photo message. Show a popup alert instead so the QR stays
-                # visible and the user can tap "I'VE PAID" again.
-                msg = result.get("message", "UPI payments may take up to 2 minutes.")
-                if "not yet received" in msg.lower():
-                    msg = "Please wait a moment and try again. UPI payments may take up to 2 minutes."
-                elif "expired" in msg.lower():
-                    msg = "This QR/order has expired. Please generate a new QR from the store."
-                alert = f"❌ Payment Not Received Yet\n\n{msg}\n\nOrder ID: {order_id}"[:200]
-                try:
-                    await query.answer(alert, show_alert=True)
-                except Exception:
-                    logger.warning("Could not show verify-failure alert: %s", order_id)
 
         # ── Downloads ─────────────────────────────────────────────────────────
         elif data == "user_downloads":
@@ -1772,130 +1432,6 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             )
             await safe_edit_text(update, context, text, back_kb("admin_main"))
 
-        # ── UPI Session Management ─────────────────────────────────────────────
-        elif data == "admin_svc_session":
-            await query.answer()
-            token = await db.get_setting("payment_svc_token", "")
-            svc_url = await db.get_setting("payment_svc_url", "http://localhost:8000")
-            mobile  = await db.get_setting("payment_svc_mobile", "Not set")
-            email   = await db.get_setting("payment_svc_email", "Not set")
-            is_active = bool(token)
-
-            # Probe the microservice for its auto-detected public base + health
-            svc_alive = False
-            public_base = "—"
-            auto_flag = ""
-            try:
-                async with aiohttp.ClientSession() as _s:
-                    async with _s.get(f"{svc_url}/health",
-                                      timeout=aiohttp.ClientTimeout(total=4)) as _r:
-                        if _r.status == 200:
-                            _j = await _r.json()
-                            svc_alive = _j.get("status") == "ok"
-                            public_base = _j.get("public_base", "—")
-                            auto_flag = " (auto-detected)" if _j.get("auto_detected") else ""
-            except Exception:
-                pass
-
-            status_icon = ce('success') if is_active else ce('fail')
-            status_text = "ACTIVE" if is_active else "NOT LOGGED IN"
-            svc_icon = ce('success') if svc_alive else ce('fail')
-            svc_label = "ONLINE" if svc_alive else "OFFLINE"
-
-            text = (
-                f"<blockquote><b>{ce('session')} UPI PAYMENT SESSION</b></blockquote>\n\n"
-                f"<b>Login Status:</b> {status_icon} <b>{status_text}</b>\n"
-                f"<b>Service Health:</b> {svc_icon} <b>{svc_label}</b>\n"
-                f"<b>Internal URL:</b> <code>{svc_url}</code>\n"
-                f"<b>Public URL{auto_flag}:</b>\n<code>{public_base}</code>\n"
-                f"<b>Mobile:</b> <code>{mobile}</code>\n"
-                f"<b>Email:</b> <code>{email}</code>\n"
-                f"{get_line(12)}\n"
-                f"<i>Login with your Gmail App Password to start accepting automated UPI payments.</i>"
-            )
-            buttons = []
-            if is_active:
-                buttons.append([InlineKeyboardButton("Re-Login", callback_data="adm_svc_login_start", style="primary", icon_custom_emoji_id=EMOJIS["refresh"][1])])
-                buttons.append([InlineKeyboardButton("Mail Report", callback_data="adm_svc_mail_report", style="primary", icon_custom_emoji_id=EMOJIS["memo"][1])])
-                buttons.append([InlineKeyboardButton("Logout", callback_data="adm_svc_logout", style="danger", icon_custom_emoji_id=EMOJIS["fail"][1])])
-            else:
-                buttons.append([InlineKeyboardButton("Login to Service", callback_data="adm_svc_login_start", style="success", icon_custom_emoji_id=EMOJIS["success"][1])])
-            buttons.append([InlineKeyboardButton("Edit Service URL", callback_data="adm_set_svc_url", style="primary", icon_custom_emoji_id=EMOJIS["link"][1])])
-            buttons.append([InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
-            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
-
-        elif data == "adm_svc_logout":
-            await query.answer()
-            await db.set_setting("payment_svc_token", "")
-            await safe_edit_text(
-                update, context,
-                f"<blockquote>{ce('success')} <b>Logged out from payment service.</b></blockquote>",
-                back_kb("admin_svc_session"),
-            )
-
-        elif data == "adm_svc_mail_report":
-            await query.answer("Scanning mailbox… 30-60 seconds lag sakte hain", show_alert=False)
-            svc_url = await db.get_setting("payment_svc_url", "http://localhost:8000")
-            svc_token = await db.get_setting("payment_svc_token", "")
-            result = await svc_mail_report(svc_url, svc_token)
-
-            if result.get("status") != "success":
-                err = result.get("message", "Unknown error")
-                await safe_edit_text(
-                    update, context,
-                    f"<blockquote>{ce('fail')} <b>Mail report failed:</b> {err}\n\n"
-                    f"Check karo ki service login active hai.</blockquote>",
-                    back_kb("admin_svc_session"),
-                )
-                return
-
-            d = result.get("data", {})
-            folders = d.get("folders", {})
-            folder_lines = "\n".join(
-                f"  • <b>{html.escape(str(name))}:</b> {count} mails" for name, count in folders.items()
-            ) or "  • No folders scanned"
-            latest_credit = d.get("latest_credit")
-            credit_line = ""
-            if latest_credit:
-                credit_line = (
-                    f"<b>Latest Credit Mail:</b>\n"
-                    f"  From: <code>{html.escape(str(latest_credit.get('from', 'N/A')))}</code>\n"
-                    f"  Subject: {html.escape(str(latest_credit.get('subject', '')))}\n"
-                    f"  Amount: ₹{latest_credit.get('amount') or '?'} | UTR: <code>{html.escape(str(latest_credit.get('utr') or 'N/A'))}</code>\n\n"
-                    f"{ce('success')} <b>Mail pipeline OK — payments verify ho sakte hain.</b>"
-                )
-            else:
-                credit_line = (
-                    f"{ce('warning')} <b>Koi credit mail nahi mila!</b>\n"
-                    f"<i>Jab tak FamPay/bank ke credit alert mails is inbox mein nahi aayenge, payment auto-verify NAHI hoga.</i>"
-                )
-
-            summary = (
-                f"<blockquote><b>{ce('memo')} MAIL DIAGNOSTIC REPORT</b></blockquote>\n\n"
-                f"<b>Account:</b> <code>{html.escape(str(d.get('email', 'N/A')))}</code>\n"
-                f"<b>Generated:</b> {d.get('generated_at_ist', '')}\n"
-                f"{get_line(12)}\n"
-                f"<b>Total Mails:</b>\n{folder_lines}\n\n"
-                f"<b>Listed (recent):</b> {d.get('listed', 0)}\n"
-                f"<b>Payment mails:</b> {d.get('payment_mails_count', 0)}\n"
-                f"<b>Credit mails:</b> {d.get('credit_mails_count', 0)}\n\n"
-                f"{credit_line}\n{get_line(12)}\n"
-                f"<i>Poora detailed report niche txt file mein hai 👇</i>"
-            )
-            report_text = d.get("report", "No report data.")
-            doc = io.BytesIO(report_text.encode("utf-8"))
-            doc.name = f"mail_report_{datetime.now().strftime('%d%m%Y_%H%M%S')}.txt"
-            try:
-                await query.message.delete()
-            except Exception:
-                pass
-            await context.bot.send_document(
-                chat_id=user_id,
-                document=doc,
-                caption=summary,
-                parse_mode=ParseMode.HTML,
-            )
-
         # ── Pending Payments Panel ──────────────────────────────────────
         elif data == "admin_pending_payments":
             await query.answer()
@@ -1918,7 +1454,6 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
                     f"  Date: {str(r.get('request_date', ''))[:16]}\n\n"
                 )
             buttons = [
-                [InlineKeyboardButton("Re-verify All Pending", callback_data="adm_reverify_all", style="primary", icon_custom_emoji_id=EMOJIS["refresh"][1])],
                 [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
@@ -1975,93 +1510,6 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
 
-        elif data == "adm_reverify_all":
-            await query.answer("Re-verifying all pending payments…", show_alert=True)
-            pending = await db.get_pending_fund_requests()
-            if not pending:
-                await safe_edit_text(
-                    update, context,
-                    f"<blockquote>{ce('success')} No pending payments to verify.</blockquote>",
-                    back_kb("admin_main"),
-                )
-                return
-
-            svc_url  = await db.get_setting("payment_svc_url", "http://localhost:8000")
-            svc_token = await db.get_setting("payment_svc_token", "")
-            admin_id  = ADMIN_IDS[0] if ADMIN_IDS else 0
-
-            delivered, failed, not_paid = 0, 0, 0
-
-            for req in pending:
-                order_id = req.get("order_id")
-                if not order_id:
-                    continue
-                result = await svc_verify_payment(svc_url, svc_token, order_id, user_id)
-                if result.get("status") == "success":
-                    pay_data = result["data"]
-                    utr = pay_data.get("utr", "N/A")
-                    txn_id = pay_data.get("transaction_id", "N/A")
-                    sender_name = pay_data.get("sender_name", "Unknown")
-                    payment_time = pay_data.get("payment_time_ist", "")
-
-                    # Anti-replay check before delivery
-                    if utr and utr != "N/A" and await db.is_utr_already_used(utr, except_order_id=order_id):
-                        await db.update_fund_request_by_order(
-                            order_id, "REJECTED_DUPLICATE_UTR",
-                            utr=utr, transaction_id=txn_id,
-                            sender_name=sender_name, payment_time=payment_time,
-                        )
-                        failed += 1
-                        await asyncio.sleep(0.3)
-                        continue
-
-                    success, msg, info = await db.purchase_key_automated(req["user_id"], req["plan_id"])
-                    if success:
-                        await db.update_fund_request_by_order(
-                            order_id, "APPROVED",
-                            utr=utr, transaction_id=txn_id,
-                            sender_name=sender_name, payment_time=payment_time,
-                            key_value=info.get("key"),
-                        )
-                        delivered += 1
-                        try:
-                            await context.bot.send_message(
-                                chat_id=req["user_id"],
-                                text=(
-                                    f"<blockquote><b>{ce('success')} PAYMENT VERIFIED! {ce('star')}</b></blockquote>\n\n"
-                                    f"<b>UTR:</b> <code>{utr}</code>\n"
-                                    f"{get_line(12)}\n"
-                                    f"<b>Product:</b> {info['product']}\n"
-                                    f"<b>Duration:</b> {info['duration']}\n"
-                                    f"<b>Expiry:</b> {info['expiry'][:10]}\n\n"
-                                    f"<blockquote><b>{ce('key')} YOUR PREMIUM KEY:</b></blockquote>\n"
-                                    f"<code>{info['key']}</code>\n\n"
-                                    f"<i>Thank you for your patience! {ce('fire')}</i>"
-                                ),
-                                parse_mode=ParseMode.HTML,
-                                reply_markup=main_menu_kb(),
-                            )
-                        except Exception:
-                            pass
-                    else:
-                        await db.update_fund_request_by_order(
-                            order_id, "PAID_NO_STOCK",
-                            utr=utr, transaction_id=txn_id,
-                            sender_name=sender_name, payment_time=payment_time,
-                        )
-                        failed += 1
-                else:
-                    not_paid += 1
-                await asyncio.sleep(0.3)  # rate limit
-
-            await safe_edit_text(
-                update, context,
-                f"<blockquote><b>{ce('stats')} RE-VERIFY RESULTS</b></blockquote>\n\n"
-                f"<b>{ce('success')} Keys Delivered:</b> {delivered}\n"
-                f"<b>{ce('fail')} Delivery Failed (no stock):</b> {failed}\n"
-                f"<b>{ce('warning')} Payment Not Received:</b> {not_paid}",
-                back_kb("admin_pending_payments"),
-            )
 
         # ── Backup DB ──────────────────────────────────────────────────────────
         elif data == "adm_export_db":
@@ -2377,116 +1825,6 @@ async def admin_nav_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-# ── NEW: Payment Service Login Flow ───────────────────────────────────────────
-async def prompt_svc_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point: ask for mobile number."""
-    await update.callback_query.answer()
-    await safe_edit_text(
-        update, context,
-        f"<blockquote><b>{ce('session')} STEP 1/3 — Mobile Number</b></blockquote>\n\n"
-        f"<i>Enter the mobile number registered with your UPI / FamPay account.</i>\n\n"
-        f"<b>Examples:</b> <code>9876543210</code> or <code>+919876543210</code>",
-        cancel_kb(),
-    )
-    return WAIT_FOR_SVC_MOBILE
-
-
-async def receive_svc_mobile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mobile = update.message.text.strip()
-    if not re.match(r"^\+?\d{10,13}$", mobile):
-        await update.message.reply_text(
-            f"<blockquote>{ce('fail')} Invalid mobile number. "
-            f"Please enter a 10-digit number (e.g. <code>9876543210</code>).</blockquote>",
-            reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
-        )
-        return WAIT_FOR_SVC_MOBILE
-    context.user_data["svc_mobile"] = mobile
-    await update.message.reply_text(
-        f"<blockquote><b>{ce('session')} STEP 2/3 — Gmail Address</b></blockquote>\n\n"
-        f"<i>Enter the Gmail address that receives your UPI payment notifications.</i>\n\n"
-        f"<b>Example:</b> <code>yourname@gmail.com</code>\n"
-        f"<i>{ce('warning')} You'll need its <b>App Password</b> in the next step.</i>",
-        reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
-    )
-    return WAIT_FOR_SVC_EMAIL
-
-
-async def receive_svc_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    email = update.message.text.strip().lower()
-    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
-        await update.message.reply_text(
-            f"<blockquote>{ce('fail')} Invalid email address. Please try again.</blockquote>",
-            reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
-        )
-        return WAIT_FOR_SVC_EMAIL
-    context.user_data["svc_email"] = email
-    await update.message.reply_text(
-        f"<blockquote><b>{ce('session')} STEP 3/3 — Gmail App Password</b></blockquote>\n\n"
-        f"<i>Paste the <b>16-character Gmail App Password</b> for the email above.</i>\n\n"
-        f"<b>Format:</b> <code>xxxx xxxx xxxx xxxx</code> (spaces are ignored)\n\n"
-        f"<b>How to get one:</b>\n"
-        f"<b>1.</b> Enable 2-Step Verification on your Google account.\n"
-        f"<b>2.</b> Go to <i>Google Account → Security → App Passwords</i>.\n"
-        f"<b>3.</b> Create a new password named <code>Hack Store</code> and paste it here.\n\n"
-        f"<i>{ce('warning')} The password is stored encrypted and is used only to read "
-        f"UPI payment notifications from your inbox.</i>",
-        reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
-    )
-    return WAIT_FOR_SVC_OTP
-
-
-async def receive_svc_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = update.message.text.strip()
-    app_password = re.sub(r"\s+", "", raw)
-    if len(app_password) != 16 or not re.match(r"^[A-Za-z0-9]+$", app_password):
-        await update.message.reply_text(
-            f"<blockquote>{ce('fail')} <b>Invalid App Password!</b>\n\n"
-            f"It must be exactly <b>16 characters</b> (letters/digits, spaces ignored).\n"
-            f"Generate one at <i>Google Account → Security → App Passwords</i> "
-            f"and paste it again.</blockquote>",
-            reply_markup=cancel_kb(), parse_mode=ParseMode.HTML,
-        )
-        return WAIT_FOR_SVC_OTP
-
-    mobile = context.user_data.get("svc_mobile", "")
-    email  = context.user_data.get("svc_email", "")
-    svc_url = await db.get_setting("payment_svc_url", "http://localhost:8000")
-    admin_id = update.effective_user.id
-
-    await update.message.reply_text(
-        f"<blockquote>{ce('refresh')} Logging in to Gmail / payment service…</blockquote>",
-        parse_mode=ParseMode.HTML,
-    )
-
-    # Try to delete the message containing the app password for safety
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-    result = await svc_login(svc_url, admin_id, mobile, email, app_password)
-
-    if result.get("status") == "ok":
-        token = result.get("session_token", "")
-        await db.set_setting("payment_svc_token", token)
-        await db.set_setting("payment_svc_mobile", mobile)
-        await db.set_setting("payment_svc_email", email)
-        await db.log_admin_action(admin_id, "Payment Service Login", f"Mobile: {mobile}")
-
-        await update.message.reply_text(
-            f"<blockquote>{ce('success')} <b>Payment service login successful!</b></blockquote>\n\n"
-            f"<i>Automated UPI payments are now active.</i>",
-            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
-        )
-    else:
-        err = result.get("message", "Login failed. Check credentials and OTP.")
-        await update.message.reply_text(
-            f"<blockquote>{ce('fail')} <b>Login Failed:</b> {err}\n\n"
-            f"Please try again from Admin Panel → UPI Session.</blockquote>",
-            reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
-        )
-
-    return ConversationHandler.END
 
 
 # ── Reseller Input Handlers ───────────────────────────────────────────────────
@@ -2565,26 +1903,8 @@ async def receive_reseller_discount(update: Update, context: ContextTypes.DEFAUL
 
 
 # ── NEW: Edit microservice URL ─────────────────────────────────────────────────
-async def prompt_set_svc_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await safe_edit_text(
-        update, context,
-        f"<blockquote><b>{ce('link')} Send the Microservice Base URL:</b></blockquote>\n\n"
-        f"<i>Example: <code>http://localhost:8000</code> or <code>https://your-server.com</code></i>",
-        cancel_kb(),
-    )
-    return WAIT_FOR_SVC_URL
 
 
-async def receive_set_svc_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip().rstrip("/")
-    await db.set_setting("payment_svc_url", url)
-    await db.log_admin_action(update.effective_user.id, "Changed Microservice URL", url)
-    await update.message.reply_text(
-        f"<blockquote>{ce('success')} <b>Microservice URL Updated!</b>\n\n<code>{url}</code></blockquote>",
-        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
-    )
-    return ConversationHandler.END
 
 
 # ── Staff Input Handlers ───────────────────────────────────────────────────────
@@ -2835,53 +2155,18 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             return
 
         except Exception as pm_err:
-            logger.error(f"PaymentManager create failed for fund, falling back to microservice: {pm_err}")
-            # Fall through
+            logger.error(f"PaymentManager create failed for fund: {pm_err}")
 
-    # ── Fallback: legacy microservice ──────────────────────────────────────
-    svc_url   = await db.get_setting("payment_svc_url", "http://localhost:8000")
-    svc_token = await db.get_setting("payment_svc_token", "")
-
-    order_id = f"FUND-{user_id}-{uuid.uuid4().hex[:6].upper()}"
-    await db.create_fund_request_with_order(user_id, order_id, None, amt * 100)
-
-    result = await svc_generate_qr(svc_url, svc_token, amt, order_id, admin_upi, payee_name=payee)
-
-    if result.get("status") == "success":
-        pay_data = result["data"]
-        qr_b64 = pay_data["qr_b64"]
-        qr_photo = io.BytesIO(base64.b64decode(qr_b64))
-        expires_at = pay_data["expires_at_ist"]
-
-        caption = (
-            f"<blockquote><b>{ce('money')} ADD FUNDS — ₹{amt:.2f}</b></blockquote>\n\n"
-            f"Scan the QR below to add money to your wallet.\n\n"
-            f"<i>{ce('warning')} QR expires at: <b>{expires_at}</b></i>\n"
-            f"<code>Order ID: {order_id}</code>"
-        )
-        buttons = [
-            [InlineKeyboardButton("I'VE PAID", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["success"][1], style="success")],
-            [InlineKeyboardButton("Cancel", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
-        ]
-
-        if update.callback_query:
-            try: await update.callback_query.message.delete()
-            except: pass
-
-        msg = await context.bot.send_photo(
-            chat_id=chat_id, photo=qr_photo, caption=caption,
-            reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML,
-        )
-        context.job_queue.run_once(
-            qr_expiration_job, when=300,
-            data={"chat_id": chat_id, "message_id": msg.message_id, "order_id": order_id},
-        )
+    # PM not available or failed — show error to user
+    err_text = (
+        f"<blockquote>{ce('fail')} <b>QR generation failed.</b>\n"
+        f"Please contact support or try again later.</blockquote>"
+    )
+    if update.callback_query:
+        await safe_edit_text(update, context, err_text, main_menu_kb())
     else:
-        err_msg = f"Error: {result.get('message', 'QR generation failed')}"
-        if update.callback_query:
-            await safe_edit_text(update, context, err_msg, main_menu_kb())
-        else:
-            await update.message.reply_text(err_msg, reply_markup=main_menu_kb())
+        await update.message.reply_text(err_text, reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
+
 
 
 async def receive_add_fund_amt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3644,8 +2929,6 @@ def main():
     admin_conv = ConversationHandler(
         entry_points=[
             # Payment service login
-            CallbackQueryHandler(prompt_svc_login, pattern="^adm_svc_login_start$"),
-            CallbackQueryHandler(prompt_set_svc_url, pattern="^adm_set_svc_url$"),
             # Broadcast & Settings
             CallbackQueryHandler(prompt_broadcast, pattern="^admin_broadcast$"),
             CallbackQueryHandler(prompt_add_staff, pattern="^adm_add_staff$"),
@@ -3677,10 +2960,6 @@ def main():
             CallbackQueryHandler(prompt_edit_howto_vid, pattern="^adm_edit_howto_vid$"),
         ],
         states={
-            WAIT_FOR_SVC_MOBILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_svc_mobile)],
-            WAIT_FOR_SVC_EMAIL:  [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_svc_email)],
-            WAIT_FOR_SVC_OTP:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_svc_otp)],
-            WAIT_FOR_SVC_URL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_svc_url)],
             WAIT_FOR_BROADCAST:       [MessageHandler(~filters.COMMAND, receive_broadcast)],
             WAIT_FOR_SETTING_UPI:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_upi)],
             WAIT_FOR_SETTING_QR:      [MessageHandler(filters.PHOTO, receive_set_qr)],

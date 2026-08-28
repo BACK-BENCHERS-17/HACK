@@ -1,11 +1,11 @@
 services:
-  - type: web
+  - type: worker
     name: hack-store-bot
     runtime: python
     plan: free
     region: oregon
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: bash start.sh
+    startCommand: python bot.py
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
@@ -17,6 +17,4 @@ services:
       - key: MONGO_URI
         sync: false
       - key: MONGO_DB_NAME
-        value: hack_store_enterprise
-      - key: PAY_SVC_HOST
-        value: 0.0.0.0
+        value: hack_store
