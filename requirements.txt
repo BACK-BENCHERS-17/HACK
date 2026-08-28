@@ -1,10 +1,10 @@
 python-telegram-bot[job-queue]
 apscheduler
-pymongo
+pymongo[srv]
 dnspython
 python-dotenv
 aiohttp
 cryptography
 qrcode[pil]
+Pillow
 tzlocal
-fampay-verify>=1.0.6
