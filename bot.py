@@ -60,7 +60,7 @@ try:
     _PM_AVAILABLE = True
 except ImportError as _pm_imp_err:
     _PM_AVAILABLE = False
-    logger.warning(f"payment_template SDK not available: {_pm_imp_err} — QR/verify will use microservice fallback.")
+    logger.warning(f"payment_template SDK not available: {_pm_imp_err} — payment features disabled.")
 
 _pm_singleton = None
 
@@ -585,7 +585,8 @@ async def admin_menu_kb(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("Maintenance", callback_data="adm_maintenance", icon_custom_emoji_id=EMOJIS["tools"][1], style="primary")
         ])
         buttons.append([
-            InlineKeyboardButton("Backup DB", callback_data="adm_export_db", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary")
+            InlineKeyboardButton("Backup DB", callback_data="adm_export_db", icon_custom_emoji_id=EMOJIS["disk"][1], style="primary"),
+            InlineKeyboardButton("UPI Session", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["settings"][1], style="primary")
         ])
     
     buttons.append([InlineKeyboardButton("Exit Admin", callback_data="user_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")])
@@ -1544,6 +1545,71 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             text = f"<blockquote><b>{ce('tools')} MAINTENANCE MODE</b></blockquote>\n\nCurrent Status: {status}"
             buttons = [
                 [InlineKeyboardButton("Toggle Mode", callback_data="adm_maintenance", style="danger", icon_custom_emoji_id=EMOJIS["loop"][1])],
+                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+            ]
+            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+
+        # ── UPI Session Management (PaymentManager SDK) ────────────────────
+        elif data == "admin_svc_session":
+            await query.answer()
+            pm = _get_pm()
+            sdk_ok = pm is not None
+
+            # Gather status info
+            upi_id = "—"
+            gmail_user = "—"
+            gmail_ok = False
+            db_ok = False
+
+            if sdk_ok:
+                cfg = pm._config
+                upi_id = cfg.default_upi_id or "Not set"
+                gmail_user = cfg.imap_username or "Not set"
+
+                # Test Gmail IMAP
+                try:
+                    import imaplib
+                    _c = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
+                    _s, _ = _c.login(cfg.imap_username, cfg.imap_app_password)
+                    gmail_ok = (_s == "OK")
+                    _c.logout()
+                except Exception:
+                    gmail_ok = False
+
+                # Test MongoDB
+                try:
+                    pm._repository._collection.database.client.server_info()
+                    db_ok = True
+                except Exception:
+                    db_ok = False
+
+            sdk_icon = ce('success') if sdk_ok else ce('fail')
+            sdk_label = "ACTIVE" if sdk_ok else "NOT INITIALIZED"
+            gmail_icon = ce('success') if gmail_ok else ce('fail')
+            gmail_label = "CONNECTED" if gmail_ok else "DISCONNECTED"
+            db_icon = ce('success') if db_ok else ce('fail')
+            db_label = "CONNECTED" if db_ok else "DISCONNECTED"
+
+            text = (
+                f"<blockquote><b>{ce('session')} UPI PAYMENT SESSION</b></blockquote>\n\n"
+                f"<b>PaymentManager SDK:</b> {sdk_icon} <b>{sdk_label}</b>\n"
+                f"<b>UPI ID:</b> <code>{upi_id}</code>\n"
+                f"<b>Gmail IMAP:</b> {gmail_icon} <b>{gmail_label}</b>\n"
+                f"  └ User: <code>{gmail_user}</code>\n"
+                f"<b>MongoDB:</b> {db_icon} <b>{db_label}</b>\n\n"
+            )
+
+            if not sdk_ok:
+                text += f"<i>⚠️ PaymentManager SDK failed to initialize. Check env vars: DEFAULT_UPI_ID, IMAP_USERNAME, IMAP_APP_PASSWORD, MONGODB_URI.</i>"
+            elif not gmail_ok:
+                text += f"<i>⚠️ Gmail IMAP connection failed. Payment verification may not work. Check IMAP credentials.</i>"
+            elif not db_ok:
+                text += f"<i>⚠️ MongoDB connection failed. Orders cannot be saved. Check MONGODB_URI.</i>"
+            else:
+                text += f"<i>✅ All systems operational. Payments will be verified automatically.</i>"
+
+            buttons = [
+                [InlineKeyboardButton("Refresh", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["loop"][1], style="primary")],
                 [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
             ]
             await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
