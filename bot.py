@@ -8,7 +8,6 @@ Payment: FamPay SDK (PaymentManager) for UPI QR + Gmail IMAP verification.
 import asyncio
 import html
 import io
-import inspect
 import logging
 import math
 import os
@@ -3083,25 +3082,22 @@ def main():
         polling_conflict["detected"] = True
         logger.error(
             "Telegram polling conflict detected; stopping this instance so the "
-            "supervisor can restart it. Only one process may use this bot token."
+            "retry loop can restart it. Only one process may use this bot token."
         )
-        # This is intentionally synchronous: PTB invokes polling error
-        # callbacks from its network loop. stop_running() performs the normal
-        # run_polling cleanup without leaving a zombie polling task.
+        # stop_running() lets run_polling finish its normal shutdown before
+        # the outer retry loop builds a new application.
         app.stop_running()
 
     async def application_error_handler(update, context):
-        """Handle conflicts on PTB versions that route polling errors here."""
+        """Handle polling errors forwarded by Application.run_polling."""
         error = context.error
         if isinstance(error, Conflict):
             mark_polling_conflict(error)
             return
         logger.error("Unhandled Telegram application error: %s", error)
 
-    # PTB 21.x forwards updater errors to registered application error
-    # handlers, while newer PTB releases expose run_polling(error_callback).
-    # Register both paths so deployments do not keep retrying a lost poll
-    # forever after a Render restart overlap.
+    # PTB forwards polling errors to application error handlers. The
+    # error_callback parameter belongs to Updater.start_polling, not here.
     app.add_error_handler(application_error_handler)
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -3220,35 +3216,42 @@ def main():
     logger.info("🔥 Bot is starting (MongoDB + in-process FamPay verification) 🔥")
     polling_kwargs = {
         "allowed_updates": Update.ALL_TYPES,
-        "drop_pending_updates": True,
+        "drop_pending_updates": False,
         "bootstrap_retries": 6,
+        # run_bot owns the loop and shuts it down after PTB cleans up. PTB's
+        # default close_loop=True leaves a closed loop installed on retries.
+        "close_loop": False,
     }
-    if "error_callback" in inspect.signature(app.run_polling).parameters:
-        polling_kwargs["error_callback"] = mark_polling_conflict
     app.run_polling(**polling_kwargs)
     if polling_conflict["detected"]:
         raise Conflict("Another process is polling this bot token.")
 
-if __name__ == "__main__":
+def run_bot(max_poll_retries: int = 6):
+    """Run each polling attempt in its own explicitly managed event loop."""
     # Retry-guard: during Render deploys the old instance can still be polling
     # while the new one starts, causing a transient getUpdates Conflict.
     # Retry with backoff instead of crashing; give up eventually so Render's
     # own restart logic takes over if a real duplicate instance exists.
-    MAX_POLL_RETRIES = 6
     retry_delay = 15
-    for attempt in range(1, MAX_POLL_RETRIES + 1):
+    for attempt in range(1, max_poll_retries + 1):
         try:
-            main()
-            break  # Clean shutdown — don't restart.
-        except Conflict:
+            # Runner creates and installs a fresh loop even on Python 3.14,
+            # where get_event_loop() no longer creates one automatically.
+            # On exit it cancels remaining tasks, shuts down async generators
+            # and executor threads, closes the loop, and clears the current
+            # loop before the next application is constructed.
+            with asyncio.Runner() as runner:
+                runner.get_loop()
+                main()
+            return  # Clean shutdown — don't restart.
+        except (Conflict, NetworkError) as error:
+            if attempt == max_poll_retries:
+                logger.error("Polling failed after %s attempts.", max_poll_retries)
+                raise  # Let the supervisor see a failure instead of exit 0.
             logger.warning(
-                f"Conflict: another bot instance is polling this token "
-                f"(attempt {attempt}/{MAX_POLL_RETRIES}). Retrying in {retry_delay}s..."
+                "%s while polling (attempt %s/%s). Retrying in %ss...",
+                type(error).__name__, attempt, max_poll_retries, retry_delay,
             )
-            time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)
-        except NetworkError as e:
-            logger.warning(f"NetworkError while polling: {e}. Retrying in {retry_delay}s...")
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 60)
         except Exception:
@@ -3259,3 +3262,7 @@ if __name__ == "__main__":
             sys.stderr.flush()
             sys.stdout.flush()
             raise
+
+
+if __name__ == "__main__":
+    run_bot()
