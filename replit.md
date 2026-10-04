@@ -10,7 +10,8 @@ A Telegram bot built with Python 3.12 using `python-telegram-bot` v21.6 and Mong
 - `config.py` — Loads `BOT_TOKEN`, `ADMIN_IDS`, `MONGO_URI`, `MONGO_DB_NAME` from environment (with hardcoded fallbacks)
 - `start.sh` — Production launcher for `bot.py`; payment verification runs in-process.
 - `requirements.txt` — Python dependencies
-- `Procfile`, `render.yaml`, `runtime.txt` — Original Render.com deployment files (kept for reference)
+- `render.yaml` — Render Web Service configuration, with `/healthz` on `PORT`.
+- `Procfile`, `runtime.txt` — Worker launch and Python runtime defaults.
 
 ## Runtime
 - Python 3.12 (Replit module). The original `runtime.txt` requested 3.11.9, but the project is compatible with 3.12.
@@ -19,6 +20,9 @@ A Telegram bot built with Python 3.12 using `python-telegram-bot` v21.6 and Mong
 ## Replit Setup
 - **Workflow**: `Telegram Bot` (console) — runs `python bot.py`. Uses long-polling against the Telegram API; no listening port is required.
 - **Deployment**: Configured as a `vm` (Reserved VM) target launching `bash start.sh`.
+- If `PORT` is supplied, the bot also serves `/healthz` and `/readyz`. Updated
+  instances sharing the same Mongo database use a `bot_runtime` lease to keep
+  only one Telegram poller active. See `README.md` for Render deployment details.
 
 ## PaymentManager SDK (`payment_template/`)
 The bot uses a self-hosted, **real** Gmail-IMAP-backed UPI payment manager. No fake/mock — every verification talks to Google and records the order/log in MongoDB.

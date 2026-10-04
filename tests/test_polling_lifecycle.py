@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import types
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from telegram.error import Conflict, NetworkError
 from telegram.ext import Application
@@ -86,6 +86,15 @@ class OfflineTelegramRequest(BaseRequest):
 class PollingLifecycleTests(unittest.TestCase):
     def setUp(self):
         asyncio.set_event_loop(None)
+        self.lease = MagicMock()
+        self.lease.acquire.return_value = True
+        self.lease.renew.return_value = True
+        lease_patch = patch.object(bot, "PollingLease", return_value=self.lease)
+        lease_patch.start()
+        self.addCleanup(lease_patch.stop)
+        health_patch = patch.object(bot, "health_endpoint")
+        health_patch.start()
+        self.addCleanup(health_patch.stop)
 
     def assert_loops_closed(self, loops):
         for loop in loops:
@@ -104,7 +113,12 @@ class PollingLifecycleTests(unittest.TestCase):
             loops.append(loop)
             request = OfflineTelegramRequest(conflict=not applications)
             requests.append(request)
-            return original_builder().request(request).get_updates_request(request).job_queue(None)
+            return original_builder().job_queue(None)
+
+        original_bot = bot.SinglePollerBot
+
+        def offline_bot(token, lease):
+            return original_bot(token, lease, request=requests[-1], get_updates_request=requests[-1])
 
         async def post_init(app):
             applications.append(app)
@@ -116,13 +130,16 @@ class PollingLifecycleTests(unittest.TestCase):
         stale_loop.close()
         asyncio.set_event_loop(stale_loop)
         with patch.object(Application, "builder", side_effect=builder), \
+                patch.object(bot, "SinglePollerBot", side_effect=offline_bot), \
                 patch.object(bot, "post_init", post_init), \
-                patch.object(bot.time, "sleep") as sleep:
+                patch.object(bot, "wait_for_shutdown", return_value=False) as sleep:
             bot.run_bot()
 
         self.assertEqual(len(applications), 2)
         self.assertIsNot(loops[0], loops[1])
-        sleep.assert_called_once_with(15)
+        sleep.assert_called_once_with(15, ANY)
+        self.assertEqual(self.lease.release.call_count, 2)
+        self.assertGreater(self.lease.renew.call_count, 0)
         for app, request in zip(applications, requests):
             self.assertFalse(app.running)
             self.assertFalse(app.updater.running)
@@ -135,44 +152,44 @@ class PollingLifecycleTests(unittest.TestCase):
     def test_network_failure_during_startup_gets_new_loop(self):
         loops = []
 
-        def attempt():
+        def attempt(**kwargs):
             loops.append(asyncio.get_event_loop())
             if len(loops) == 1:
                 raise NetworkError("offline")
             loops[-1].run_until_complete(asyncio.sleep(0))
 
         with patch.object(bot, "main", side_effect=attempt), \
-                patch.object(bot.time, "sleep") as sleep:
+                patch.object(bot, "wait_for_shutdown", return_value=False) as sleep:
             bot.run_bot()
         self.assertEqual(len(loops), 2)
         self.assertIsNot(loops[0], loops[1])
-        sleep.assert_called_once_with(15)
+        sleep.assert_called_once_with(15, ANY)
         self.assert_loops_closed(loops)
 
     def test_exhausted_retries_raise_and_do_not_sleep_again(self):
         loops = []
 
-        def attempt():
+        def attempt(**kwargs):
             loops.append(asyncio.get_event_loop())
             raise Conflict("another instance")
 
         with patch.object(bot, "main", side_effect=attempt), \
-                patch.object(bot.time, "sleep") as sleep:
+                patch.object(bot, "wait_for_shutdown", return_value=False) as sleep:
             with self.assertRaises(Conflict):
                 bot.run_bot(max_poll_retries=2)
         self.assertEqual(len(loops), 2)
-        sleep.assert_called_once_with(15)
+        sleep.assert_called_once_with(15, ANY)
         self.assert_loops_closed(loops)
 
     def test_fatal_error_closes_loop_without_retry(self):
         loops = []
 
-        def attempt():
+        def attempt(**kwargs):
             loops.append(asyncio.get_event_loop())
             raise ValueError("bad configuration")
 
         with patch.object(bot, "main", side_effect=attempt), \
-                patch.object(bot.time, "sleep") as sleep:
+                patch.object(bot, "wait_for_shutdown", return_value=False) as sleep:
             with self.assertRaises(ValueError):
                 bot.run_bot()
         sleep.assert_not_called()
@@ -188,7 +205,7 @@ class PollingLifecycleTests(unittest.TestCase):
             finally:
                 await finished()
 
-        def attempt():
+        def attempt(**kwargs):
             loop = asyncio.get_event_loop()
             loops.append(loop)
             loop.create_task(background())
@@ -198,6 +215,31 @@ class PollingLifecycleTests(unittest.TestCase):
             bot.run_bot()
         finished.assert_awaited_once()
         self.assert_loops_closed(loops)
+
+    def test_waits_for_owner_before_building_telegram_application(self):
+        self.lease.acquire.side_effect = [False, False, True]
+        with patch.object(bot, "main") as main, \
+                patch.object(bot, "wait_for_shutdown", return_value=False) as wait:
+            bot.run_bot(max_poll_retries=1)
+        self.assertEqual(wait.call_count, 2)
+        main.assert_called_once_with(polling_lease=self.lease)
+        self.lease.release.assert_called_once()
+
+    def test_shutdown_while_in_standby_never_polls_or_releases_other_owner(self):
+        self.lease.acquire.return_value = False
+        with patch.object(bot, "main") as main, \
+                patch.object(bot, "wait_for_shutdown", return_value=True):
+            bot.run_bot()
+        main.assert_not_called()
+        self.lease.release.assert_not_called()
+
+    def test_lost_lease_reacquires_before_restart(self):
+        with patch.object(bot, "main", side_effect=[bot.PollingLeaseLost("lost"), None]) as main, \
+                patch.object(bot, "wait_for_shutdown", return_value=False):
+            bot.run_bot(max_poll_retries=1)
+        self.assertEqual(main.call_count, 2)
+        self.assertEqual(self.lease.acquire.call_count, 2)
+        self.assertEqual(self.lease.release.call_count, 2)
 
 
 if __name__ == "__main__":

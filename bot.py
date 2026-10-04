@@ -8,16 +8,24 @@ Payment: FamPay SDK (PaymentManager) for UPI QR + Gmail IMAP verification.
 import asyncio
 import html
 import io
+import json
 import logging
 import math
 import os
 import re
+import signal
+import threading
 import time
 import traceback
 import uuid
 import warnings
-from datetime import datetime, timedelta
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote
+
+from pymongo import ReturnDocument, timeout as mongo_timeout
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from telegram import (
     Update,
@@ -30,9 +38,10 @@ from telegram import (
     WebAppInfo,
 )
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import BadRequest, Conflict, NetworkError
+from telegram.error import BadRequest, Conflict, NetworkError, TelegramError
 from telegram.ext import (
     Application,
+    ExtBot,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -96,6 +105,161 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()],
 )
+
+
+class TokenRedactingFormatter(logging.Formatter):
+    def format(self, record):
+        return super().format(record).replace(BOT_TOKEN, "[REDACTED]")
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.setFormatter(TokenRedactingFormatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    ))
+# HTTPX includes Telegram's token-bearing request URL in its normal INFO logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+RUNTIME_STATE = {"polling": "starting"}
+
+
+class HealthServer:
+    """Render liveness endpoint, independent of the Telegram polling loop."""
+
+    def __init__(self, port):
+        class Handler(BaseHTTPRequestHandler):
+            def setup(self):
+                super().setup()
+                self.connection.settimeout(5)
+
+            def do_GET(self):
+                path = self.path.partition("?")[0]
+                if path not in ("/", "/healthz", "/readyz"):
+                    self.send_error(404)
+                    return
+                state = RUNTIME_STATE["polling"]
+                # A standby instance must pass Render's liveness check so
+                # Render can retire the old instance and release its lease.
+                ready = state == "active" if path == "/readyz" else state not in ("failed", "stopping")
+                body = json.dumps({"status": "ok" if ready else "unavailable", "polling": state}).encode()
+                self.send_response(200 if ready else 503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+
+            do_HEAD = do_GET
+
+            def log_message(self, format, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            kwargs={"poll_interval": 0.2}, daemon=True,
+        )
+
+    def __enter__(self):
+        self.thread.start()
+        logger.info("Health endpoint listening on 0.0.0.0:%s", self.server.server_port)
+        return self
+
+    def __exit__(self, *args):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+
+@contextmanager
+def health_endpoint():
+    port = os.environ.get("PORT")
+    if not port:
+        yield  # Worker/local deployments need no HTTP port.
+        return
+    port = int(port)
+    if not 1 <= port <= 65535:
+        raise ValueError("PORT must be between 1 and 65535.")
+    with HealthServer(port) as server:
+        yield server
+
+
+class PollingLeaseLost(TelegramError):
+    """This instance must stop polling until it owns the database lease."""
+
+
+class PollingLease:
+    """One expiring Mongo document per bot ID coordinates updated instances."""
+
+    def __init__(self, collection, bot_id, ttl_seconds=90):
+        self.collection = collection
+        self.key = f"telegram-poller:{bot_id}"
+        self.owner = uuid.uuid4().hex
+        # Longer than the 10-second Telegram long poll and request timeouts.
+        self.ttl = timedelta(seconds=ttl_seconds)
+
+    def acquire(self):
+        now = datetime.now(timezone.utc)
+        try:
+            with mongo_timeout(5):
+                record = self.collection.find_one_and_update(
+                    {"_id": self.key, "$or": [
+                        {"owner": self.owner}, {"expires_at": {"$lte": now}},
+                    ]},
+                    {"$set": {"owner": self.owner, "expires_at": now + self.ttl}},
+                    upsert=True, return_document=ReturnDocument.AFTER,
+                )
+            return record["owner"] == self.owner
+        except DuplicateKeyError:
+            # The unique _id belongs to a live owner. Wait rather than poll.
+            return False
+
+    def renew(self):
+        now = datetime.now(timezone.utc)
+        with mongo_timeout(5):
+            result = self.collection.update_one(
+                {"_id": self.key, "owner": self.owner, "expires_at": {"$gt": now}},
+                {"$set": {"expires_at": now + self.ttl}},
+            )
+        return result.matched_count == 1
+
+    def release(self):
+        with mongo_timeout(5):
+            self.collection.delete_one({"_id": self.key, "owner": self.owner})
+
+
+class SinglePollerBot(ExtBot):
+    """Check ownership before every getUpdates call, including shutdown."""
+
+    __slots__ = ("_polling_lease",)
+
+    def __init__(self, token, polling_lease, **kwargs):
+        super().__init__(token=token, **kwargs)
+        object.__setattr__(self, "_polling_lease", polling_lease)
+
+    async def get_updates(self, *args, **kwargs):
+        try:
+            owned = await asyncio.to_thread(self._polling_lease.renew)
+        except PyMongoError as exc:
+            raise PollingLeaseLost("Unable to renew polling ownership.") from exc
+        if not owned:
+            raise PollingLeaseLost("Polling ownership expired or moved to another instance.")
+        updates = await super().get_updates(*args, **kwargs)
+        RUNTIME_STATE["polling"] = "active"
+        return updates
+
+
+def wait_for_shutdown(seconds, stop_event):
+    """Honor Render SIGTERM while waiting for ownership or retrying."""
+    previous = {}
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, lambda *_: stop_event.set())
+        return stop_event.wait(seconds)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 # ==============================================================================
 # 1. CUSTOM EMOJI MAP & HELPERS
@@ -3071,19 +3235,22 @@ async def receive_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==============================================================================
 # 11. MAIN APPLICATION BUILDER & EXECUTION
 # ==============================================================================
-def main():
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    polling_conflict = {"detected": False}
+def main(polling_lease=None):
+    builder = Application.builder().post_init(post_init)
+    if polling_lease is None:
+        builder = builder.token(BOT_TOKEN)
+    else:
+        builder = builder.bot(SinglePollerBot(BOT_TOKEN, polling_lease))
+    app = builder.build()
+    polling_failure = {"error": None}
 
     def mark_polling_conflict(error):
         """Stop this process when another instance owns Telegram polling."""
-        if not isinstance(error, Conflict):
+        if not isinstance(error, (Conflict, PollingLeaseLost)):
             return
-        polling_conflict["detected"] = True
-        logger.error(
-            "Telegram polling conflict detected; stopping this instance so the "
-            "retry loop can restart it. Only one process may use this bot token."
-        )
+        polling_failure["error"] = error
+        RUNTIME_STATE["polling"] = "retrying"
+        logger.warning("%s: stopping this poller before retrying.", type(error).__name__)
         # stop_running() lets run_polling finish its normal shutdown before
         # the outer retry loop builds a new application.
         app.stop_running()
@@ -3091,7 +3258,7 @@ def main():
     async def application_error_handler(update, context):
         """Handle polling errors forwarded by Application.run_polling."""
         error = context.error
-        if isinstance(error, Conflict):
+        if isinstance(error, (Conflict, PollingLeaseLost)):
             mark_polling_conflict(error)
             return
         logger.error("Unhandled Telegram application error: %s", error)
@@ -3218,50 +3385,68 @@ def main():
         "allowed_updates": Update.ALL_TYPES,
         "drop_pending_updates": False,
         "bootstrap_retries": 6,
+        "timeout": 10,
         # run_bot owns the loop and shuts it down after PTB cleans up. PTB's
         # default close_loop=True leaves a closed loop installed on retries.
         "close_loop": False,
     }
     app.run_polling(**polling_kwargs)
-    if polling_conflict["detected"]:
-        raise Conflict("Another process is polling this bot token.")
+    if polling_failure["error"] is not None:
+        raise polling_failure["error"]
 
 def run_bot(max_poll_retries: int = 6):
-    """Run each polling attempt in its own explicitly managed event loop."""
-    # Retry-guard: during Render deploys the old instance can still be polling
-    # while the new one starts, causing a transient getUpdates Conflict.
-    # Retry with backoff instead of crashing; give up eventually so Render's
-    # own restart logic takes over if a real duplicate instance exists.
+    """Serve health checks while waiting for exclusive polling ownership."""
+    stop_event = threading.Event()
     retry_delay = 15
-    for attempt in range(1, max_poll_retries + 1):
+    failures = 0
+    RUNTIME_STATE["polling"] = "starting"
+    with health_endpoint():
+        lease = PollingLease(db.db["bot_runtime"], BOT_TOKEN.split(":", 1)[0])
         try:
-            # Runner creates and installs a fresh loop even on Python 3.14,
-            # where get_event_loop() no longer creates one automatically.
-            # On exit it cancels remaining tasks, shuts down async generators
-            # and executor threads, closes the loop, and clears the current
-            # loop before the next application is constructed.
-            with asyncio.Runner() as runner:
-                runner.get_loop()
-                main()
-            return  # Clean shutdown — don't restart.
-        except (Conflict, NetworkError) as error:
-            if attempt == max_poll_retries:
-                logger.error("Polling failed after %s attempts.", max_poll_retries)
-                raise  # Let the supervisor see a failure instead of exit 0.
-            logger.warning(
-                "%s while polling (attempt %s/%s). Retrying in %ss...",
-                type(error).__name__, attempt, max_poll_retries, retry_delay,
-            )
-            time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)
-        except Exception:
-            logger.error("FATAL ERROR DURING STARTUP:")
-            logger.error(traceback.format_exc())
-            # Force flush logs
-            import sys
-            sys.stderr.flush()
-            sys.stdout.flush()
-            raise
+            while not stop_event.is_set():
+                try:
+                    if not lease.acquire():
+                        if RUNTIME_STATE["polling"] != "standby":
+                            logger.info("Another instance holds the polling lease; waiting in standby.")
+                        RUNTIME_STATE["polling"] = "standby"
+                        if wait_for_shutdown(5, stop_event):
+                            return
+                        continue  # Waiting for an owner is not a failed attempt.
+                    RUNTIME_STATE["polling"] = "starting"
+                    try:
+                        # Install a new loop for each application (Python 3.14
+                        # does not create a current loop automatically).
+                        with asyncio.Runner() as runner:
+                            runner.get_loop()
+                            main(polling_lease=lease)
+                    finally:
+                        # Release only after PTB and Runner have stopped all
+                        # polling tasks, including the final getUpdates call.
+                        try:
+                            lease.release()
+                        except PyMongoError:
+                            logger.warning("Could not release polling lease; it will expire.")
+                    return
+                except PollingLeaseLost:
+                    RUNTIME_STATE["polling"] = "standby"
+                    if wait_for_shutdown(5, stop_event):
+                        return
+                except (Conflict, NetworkError, PyMongoError) as error:
+                    failures += 1
+                    if failures >= max_poll_retries:
+                        RUNTIME_STATE["polling"] = "failed"
+                        logger.error("Polling failed after %s attempts. Stop any other deployment using this bot token.", failures)
+                        raise
+                    RUNTIME_STATE["polling"] = "retrying"
+                    logger.warning(
+                        "%s while polling (attempt %s/%s). Retrying in %ss...",
+                        type(error).__name__, failures, max_poll_retries, retry_delay,
+                    )
+                    if wait_for_shutdown(retry_delay, stop_event):
+                        return
+                    retry_delay = min(retry_delay * 2, 60)
+        finally:
+            RUNTIME_STATE["polling"] = "stopping"
 
 
 if __name__ == "__main__":
