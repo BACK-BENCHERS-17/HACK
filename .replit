@@ -19,10 +19,6 @@ author = "agent"
 task = "workflow.run"
 args = "Telegram Bot"
 
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Payment Service"
-
 [[workflows.workflow]]
 name = "Telegram Bot"
 author = "agent"
@@ -34,22 +30,6 @@ args = "python bot.py"
 [workflows.workflow.metadata]
 outputType = "console"
 
-[[workflows.workflow]]
-name = "Payment Service"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python payment_service.py"
-waitForPort = 8000
-
-[workflows.workflow.metadata]
-outputType = "console"
-
 [deployment]
 deploymentTarget = "vm"
 run = ["bash", "start.sh"]
-
-[[ports]]
-localPort = 8000
-externalPort = 80

@@ -6,7 +6,6 @@ Payment: FamPay SDK (PaymentManager) for UPI QR + Gmail IMAP verification.
 """
 
 import asyncio
-import base64
 import html
 import io
 import logging
@@ -45,6 +44,8 @@ from telegram.ext import (
 from config import BOT_TOKEN, ADMIN_IDS
 from database import DatabaseManager
 
+logger = logging.getLogger(__name__)
+
 # ── FamPay Payment SDK ──────────────────────────────────────────────────────
 import sys
 _sdk_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_template")
@@ -53,26 +54,32 @@ if os.path.isdir(_sdk_dir) and _sdk_dir not in sys.path:
 
 try:
     from payment_template import PaymentManager
-    from payment_template.exceptions import (
-        ConfigurationError, DatabaseError as PMDatabaseError,
-        GmailError, OrderNotFoundError, OrderStateError, VerificationError,
-    )
     _PM_AVAILABLE = True
 except ImportError as _pm_imp_err:
     _PM_AVAILABLE = False
     logger.warning(f"payment_template SDK not available: {_pm_imp_err} — payment features disabled.")
 
 _pm_singleton = None
+_pm_config_key = None
 
-def _get_pm():
-    """Lazy singleton for the PaymentManager SDK."""
-    global _pm_singleton
-    if _pm_singleton is not None:
+def _get_pm(*, default_upi_id: str | None = None,
+            default_payee_name: str | None = None):
+    """Return a PaymentManager configured for the current store settings."""
+    global _pm_singleton, _pm_config_key
+    requested_key = (default_upi_id or "", default_payee_name or "")
+    has_requested_config = bool(default_upi_id or default_payee_name)
+    if _pm_singleton is not None and (
+        not has_requested_config or requested_key == _pm_config_key
+    ):
         return _pm_singleton
     if not _PM_AVAILABLE:
         return None
     try:
-        _pm_singleton = PaymentManager()
+        _pm_singleton = PaymentManager(
+            default_upi_id=default_upi_id,
+            default_payee_name=default_payee_name,
+        )
+        _pm_config_key = requested_key
         logger.info("PaymentManager SDK initialized successfully.")
         return _pm_singleton
     except Exception as e:
@@ -89,7 +96,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()],
 )
-logger = logging.getLogger(__name__)
 
 # ==============================================================================
 # 1. CUSTOM EMOJI MAP & HELPERS
@@ -319,7 +325,9 @@ async def qr_expiration_job(context: ContextTypes.DEFAULT_TYPE):
 
     # Check if order was already PAID to avoid deleting valid success screens
     req = await db.get_fund_request_by_order(order_id)
-    if req and req.get("status") == "PAID":
+    if req and req.get("status") in {
+        "APPROVED", "PAID", "PAID_NO_STOCK", "PROCESSING",
+    }:
         return
 
     try:
@@ -331,7 +339,7 @@ async def qr_expiration_job(context: ContextTypes.DEFAULT_TYPE):
         chat_id=chat_id,
         text=(
             f"<blockquote><b>{ce('warning')} QR CODE EXPIRED</b></blockquote>\n\n"
-            f"The payment QR for Order ID <code>{order_id}</code> has expired (5 minute limit).\n"
+            f"The payment QR for Order ID <code>{order_id}</code> has expired (15 minute limit).\n"
             f"If you still wish to purchase, please generate a new QR code from the store."
         ),
         parse_mode=ParseMode.HTML,
@@ -817,34 +825,34 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 return
 
-            # Check for reseller discount
-            price_paise = float(plan['price'])
+            # Check for reseller discount. Keep the payable amount in paise as
+            # an integer through the order and database layers.
+            price_paise = int(plan['price'])
             is_reseller, discount_perc = await db.is_active_reseller(user_id)
             if is_reseller:
-                price_paise = price_paise * (1 - (discount_perc / 100))
+                price_paise = int(round(price_paise * (1 - (discount_perc / 100))))
 
             price_inr = price_paise / 100
             payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
 
             # ── Try PaymentManager SDK first ──────────────────────────────────
-            pm = _get_pm()
+            pm = _get_pm(default_upi_id=admin_upi, default_payee_name=payee)
             if pm:
                 try:
-                    # Ensure env vars are set for the SDK
-                    _env_map = {
-                        "DEFAULT_UPI_ID": admin_upi,
-                        "DEFAULT_PAYEE_NAME": payee,
-                    }
-                    for k, v in _env_map.items():
-                        if v:
-                            os.environ[k] = v
-
                     order = await asyncio.to_thread(pm.create, user_id=user_id, amount=price_inr)
                     order_id = order.id
                     expires_at = order.expires_at.strftime("%d %b %Y, %I:%M %p IST")
 
                     # Store fund_request in DB with PENDING status (Paise)
-                    await db.create_fund_request_with_order(user_id, order_id, plan_id, price_paise)
+                    stored = await db.create_fund_request_with_order(
+                        user_id, order_id, plan_id, price_paise, "PRODUCT"
+                    )
+                    if not stored:
+                        try:
+                            await asyncio.to_thread(pm.cancel, order_id)
+                        except Exception:
+                            pass
+                        raise RuntimeError("The payment order could not be saved.")
 
                     # Use PM's branded QR image (bytes)
                     qr_photo = io.BytesIO(order.qr_image)
@@ -885,8 +893,16 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     return
 
                 except Exception as pm_err:
-                    logger.error(f"PaymentManager create failed, falling back to microservice: {pm_err}")
-                    # Fall through to microservice fallback below
+                    logger.error(f"PaymentManager create failed: {pm_err}")
+
+            await safe_edit_text(
+                update,
+                context,
+                f"<blockquote>{ce('fail')} <b>Payment QR generation failed.</b>\n"
+                f"Please try again in a moment or contact support.</blockquote>",
+                back_kb("user_buy_hack"),
+            )
+            return
 
 
         # ── Verify payment (user clicks I'VE PAID) ────────────────────────────
@@ -894,8 +910,27 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("Verifying payment…", show_alert=False)
             order_id  = data[len("verify_pay_"):]
 
+            req = await db.get_fund_request_by_order(order_id)
+            if not req:
+                await query.answer("Order not found. Contact support.", show_alert=True)
+                return
+
+            # Telegram may deliver the same callback more than once. Never
+            # consume another key or credit a wallet for a completed request.
+            current_status = req.get("status", "PENDING")
+            if current_status in {
+                "APPROVED", "PAID", "PAID_NO_STOCK", "REJECTED_DUPLICATE_UTR",
+            }:
+                await query.answer("This payment was already processed.", show_alert=True)
+                return
+            if current_status == "PROCESSING":
+                await query.answer("Payment is already being processed. Please wait.", show_alert=True)
+                return
+
             # ── Try PaymentManager SDK first ──────────────────────────────────
-            pm = _get_pm()
+            admin_upi = await db.get_setting("upi_id", "")
+            payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
+            pm = _get_pm(default_upi_id=admin_upi, default_payee_name=payee)
             if pm:
                 try:
                     result = await asyncio.to_thread(pm.verify, order_id)
@@ -906,30 +941,53 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         utr = result.get("utr", "N/A")
                         txn_id = result.get("transaction_id", utr)
                         sender_name = result.get("sender_name", "Unknown")
-                        paid_amount = result.get("amount", 0)
                         payment_time = result.get("payment_time_ist", "")
 
-                        req = await db.get_fund_request_by_order(order_id)
-                        if not req:
-                            await query.answer("Order not found. Contact support.", show_alert=True)
-                            return
-
-                        # Anti-replay: if this UTR is already attached to a different order
-                        if utr and utr != "N/A" and await db.is_utr_already_used(utr, except_order_id=order_id):
-                            await db.update_fund_request_by_order(order_id, "REJECTED_DUPLICATE_UTR",
-                                    utr=utr, transaction_id=txn_id, sender_name=sender_name,
-                                    payment_time=payment_time)
+                        # Anti-replay: reject a UTR or transaction id already
+                        # attached to a different order.
+                        references = {
+                            ref for ref in (utr, txn_id)
+                            if ref and ref != "N/A"
+                        }
+                        if any(
+                            await db.is_payment_reference_already_used(
+                                ref, except_order_id=order_id
+                            )
+                            for ref in references
+                        ):
+                            # Do not write the already-used reference onto
+                            # this order: the unique replay index must remain
+                            # owned by the original payment.
+                            await db.update_fund_request_by_order(
+                                order_id,
+                                "REJECTED_DUPLICATE_UTR",
+                                sender_name=sender_name,
+                                payment_time=payment_time,
+                            )
                             await safe_edit_text(update, context,
                                 f"<blockquote>{ce('fail')} <b>This payment reference (UTR) "
                                 f"has already been used to claim a key.</b>\n\n"
                                 f"<code>{order_id}</code></blockquote>", back_kb("user_main"))
                             return
 
-                        # Handle balance top-up (FUND order)
-                        if order_id.startswith("FUND"):
-                            await db.update_fund_request_by_order(order_id, "APPROVED",
-                                    utr=utr, transaction_id=txn_id, sender_name=sender_name,
-                                    payment_time=payment_time)
+                        # Handle balance top-up. SDK-generated fund orders use
+                        # ORD-* IDs, so plan_id=None is the reliable marker.
+                        if req.get("order_type") == "FUND" or (
+                            not req.get("order_type") and req.get("plan_id") is None
+                        ):
+                            funded, fund_req = await db.approve_fund_request(
+                                order_id,
+                                utr=utr,
+                                transaction_id=txn_id,
+                                sender_name=sender_name,
+                                payment_time=payment_time,
+                            )
+                            if not funded:
+                                await query.answer(
+                                    "This payment is already being processed or was completed.",
+                                    show_alert=True,
+                                )
+                                return
                             fund_amt = float(req.get("amount_requested", 0)) / 100
                             await safe_edit_text(update, context,
                                 f"<blockquote>{ce('success')} <b>FUNDS ADDED SUCCESSFULLY!</b></blockquote>\n\n"
@@ -938,7 +996,24 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                                 main_menu_kb())
                             return
 
-                        # Check if key was already delivered by microservice fallback
+                        # Claim the request before consuming stock. This keeps
+                        # duplicate callback deliveries from issuing two keys.
+                        claimed, _claim = await db.begin_payment_fulfillment(
+                            order_id,
+                            utr=utr,
+                            transaction_id=txn_id,
+                            sender_name=sender_name,
+                            payment_time=payment_time,
+                        )
+                        if not claimed:
+                            await query.answer(
+                                "This payment is already being processed or was completed.",
+                                show_alert=True,
+                            )
+                            return
+
+                        # Check if key was already delivered by an older
+                        # payment-service integration
                         if result.get("delivered_key"):
                             info = {
                                 "key": result.get("delivered_key"),
@@ -975,8 +1050,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                             user_obj = await db.get_user(user_id)
                             uname = (user_obj.get("username") or "").lstrip("@")
                             fname = user_obj.get("first_name") or ""
-                            plan_obj = await db.get_plan(req["plan_id"]) or {}
-                            expected_amount = plan_obj.get("price", 0)
+                            expected_amount = req.get("amount_requested", 0)
                             await notify_admins(context, (
                                 f"<blockquote><b>{ce('success')} AUTO PAYMENT SUCCESS — KEY DELIVERED</b></blockquote>\n"
                                 f"{get_line(12)}\n"
@@ -998,7 +1072,6 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         return
 
                     elif result.get("status") in ("expired", "cancelled"):
-                        _pm_orders.pop(order_id, None)
                         await query.answer(f"Order {result['status']}. Use /pay again.", show_alert=True)
                         return
                     else:
@@ -1016,8 +1089,13 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                         return
 
                 except Exception as pm_err:
-                    logger.error(f"PM verify failed, falling back to microservice: {pm_err}")
-                    # Fall through to microservice fallback
+                    logger.error(f"PM verify failed: {pm_err}")
+
+            await query.answer(
+                "Payment verification is temporarily unavailable. Please try again.",
+                show_alert=True,
+            )
+            return
 
 
         # ── Downloads ─────────────────────────────────────────────────────────
@@ -1451,7 +1529,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             for r in pending[:10]:  # show up to 10
                 text += (
                     f"<code>{r.get('order_id', r.get('id', 'N/A'))}</code>\n"
-                    f"  User: <code>{r['user_id']}</code> | ₹{r.get('amount', 0)/100:.2f}\n"
+                    f"  User: <code>{r['user_id']}</code> | ₹{r.get('amount_requested', 0)/100:.2f}\n"
                     f"  Date: {str(r.get('request_date', ''))[:16]}\n\n"
                 )
             buttons = [
@@ -1552,7 +1630,12 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── UPI Session Management (PaymentManager SDK) ────────────────────
         elif data == "admin_svc_session":
             await query.answer()
-            pm = _get_pm()
+            session_upi = await db.get_setting("upi_id", "")
+            session_payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
+            pm = _get_pm(
+                default_upi_id=session_upi,
+                default_payee_name=session_payee,
+            )
             sdk_ok = pm is not None
 
             # Gather status info
@@ -1578,7 +1661,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 
                 # Test MongoDB
                 try:
-                    pm._repository._collection.database.client.server_info()
+                    pm._repository.db.client.server_info()
                     db_ok = True
                 except Exception:
                     db_ok = False
@@ -1600,13 +1683,13 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
             )
 
             if not sdk_ok:
-                text += f"<i>⚠️ PaymentManager SDK failed to initialize. Check env vars: DEFAULT_UPI_ID, IMAP_USERNAME, IMAP_APP_PASSWORD, MONGODB_URI.</i>"
+                text += "<i>⚠️ PaymentManager SDK failed to initialize. Check DEFAULT_UPI_ID or the admin UPI setting, IMAP_USERNAME, IMAP_APP_PASSWORD, and MongoDB credentials.</i>"
             elif not gmail_ok:
-                text += f"<i>⚠️ Gmail IMAP connection failed. Payment verification may not work. Check IMAP credentials.</i>"
+                text += "<i>⚠️ Gmail IMAP connection failed. Payment verification may not work. Check IMAP credentials.</i>"
             elif not db_ok:
-                text += f"<i>⚠️ MongoDB connection failed. Orders cannot be saved. Check MONGODB_URI.</i>"
+                text += "<i>⚠️ MongoDB connection failed. Orders cannot be saved. Check MONGO_URI/MONGODB_URI and the database name.</i>"
             else:
-                text += f"<i>✅ All systems operational. Payments will be verified automatically.</i>"
+                text += "<i>✅ All systems operational. Payments will be verified automatically.</i>"
 
             buttons = [
                 [InlineKeyboardButton("Refresh", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["loop"][1], style="primary")],
@@ -2179,18 +2262,22 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     chat_id = update.effective_chat.id
 
     # ── Try PaymentManager SDK first ──────────────────────────────────────
-    pm = _get_pm()
+    pm = _get_pm(default_upi_id=admin_upi, default_payee_name=payee)
     if pm:
         try:
-            _env_map = {"DEFAULT_UPI_ID": admin_upi, "DEFAULT_PAYEE_NAME": payee}
-            for k, v in _env_map.items():
-                if v: os.environ[k] = v
-
             order = await asyncio.to_thread(pm.create, user_id=user_id, amount=amt)
             order_id = order.id
             expires_at = order.expires_at.strftime("%d %b %Y, %I:%M %p IST")
 
-            await db.create_fund_request_with_order(user_id, order_id, None, amt * 100)
+            stored = await db.create_fund_request_with_order(
+                user_id, order_id, None, int(round(amt * 100)), "FUND"
+            )
+            if not stored:
+                try:
+                    await asyncio.to_thread(pm.cancel, order_id)
+                except Exception:
+                    pass
+                raise RuntimeError("The wallet payment order could not be saved.")
 
             qr_photo = io.BytesIO(order.qr_image)
             qr_photo.name = f"{order_id}.png"
@@ -3100,7 +3187,7 @@ def main():
         pattern="^(admin_|adm_)",
     ))
 
-    logger.info("🔥 Bot is starting (MongoDB + Render + Self-hosted Payment Service) 🔥")
+    logger.info("🔥 Bot is starting (MongoDB + in-process FamPay verification) 🔥")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":

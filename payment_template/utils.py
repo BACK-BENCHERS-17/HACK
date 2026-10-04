@@ -33,7 +33,7 @@ def parse_amount(value: float | int | str | Decimal) -> Decimal:
     except (InvalidOperation, ValueError) as exc:
         raise ConfigurationError("amount must be a valid number.") from exc
 
-    if amount <= 0:
+    if not amount.is_finite() or amount <= 0:
         raise ConfigurationError("amount must be greater than zero.")
     return amount
 

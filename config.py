@@ -11,8 +11,15 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 _admin_raw = os.environ.get("ADMIN_IDS", "").strip()
 ADMIN_IDS = [int(x.strip()) for x in _admin_raw.split(",") if x.strip().isdigit()]
 
-MONGO_URI = os.environ.get("MONGO_URI", "").strip()
-MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "hack_store").strip()
+# Both names have been used by deployed versions of the store.  Keep one
+# canonical value in the application so the bot and PaymentManager always use
+# the same MongoDB database.
+MONGO_URI = (os.environ.get("MONGO_URI") or os.environ.get("MONGODB_URI") or "").strip()
+MONGO_DB_NAME = (
+    os.environ.get("MONGO_DB_NAME")
+    or os.environ.get("DB_NAME")
+    or "hack_store_enterprise"
+).strip()
 
 # ── Payment SDK config (read from env, can be overridden via /admin) ──
 DEFAULT_UPI_ID = os.environ.get("DEFAULT_UPI_ID", "").strip()
@@ -26,7 +33,9 @@ IMAP_APP_PASSWORD = os.environ.get("IMAP_APP_PASSWORD", "").strip()
 IMAP_HOST = os.environ.get("IMAP_HOST", "imap.gmail.com").strip() or "imap.gmail.com"
 IMAP_PORT = int(os.environ.get("IMAP_PORT", "993") or "993")
 IMAP_MAILBOX = os.environ.get("IMAP_MAILBOX", "INBOX").strip() or "INBOX"
-IMAP_SENDER_FILTER = os.environ.get("IMAP_SENDER_FILTER", "no-reply@famapp.in").strip()
+# Search broadly enough to cover the sender aliases used by FamApp/FamPay;
+# message content still has to pass the incoming-credit checks.
+IMAP_SENDER_FILTER = os.environ.get("IMAP_SENDER_FILTER", "fam").strip()
 GMAIL_LOOKBACK_HOURS = int(os.environ.get("GMAIL_LOOKBACK_HOURS", "12") or "12")
 ORDER_EXPIRY_MINUTES = int(os.environ.get("ORDER_EXPIRY_MINUTES", "15") or "15")
 

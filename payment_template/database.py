@@ -8,10 +8,10 @@ from typing import Any
 
 from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from .config import AppConfig
-from .exceptions import DatabaseError, OrderNotFoundError
+from .exceptions import DatabaseError, OrderNotFoundError, OrderStateError
 from .models import Order, OrderStatus
 from .utils import ensure_utc, utcnow
 
@@ -25,6 +25,11 @@ class VerificationLogRecord:
     purpose: str
     verified_at: datetime
     gmail_message_timestamp: datetime
+    amount: str | None = None
+    utr: str | None = None
+    transaction_id: str | None = None
+    sender_name: str | None = None
+    payment_time_ist: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -33,6 +38,11 @@ class VerificationLogRecord:
             "purpose": self.purpose,
             "verified_at": self.verified_at,
             "gmail_message_timestamp": self.gmail_message_timestamp,
+            "amount": self.amount,
+            "utr": self.utr,
+            "transaction_id": self.transaction_id,
+            "sender_name": self.sender_name,
+            "payment_time_ist": self.payment_time_ist,
         }
 
 
@@ -68,8 +78,10 @@ class MongoRepository:
             return
         try:
             self.orders.create_index("id", unique=True)
+            self.orders.create_index([("amount", 1), ("created_at", 1), ("expires_at", 1)])
             self.verification_logs.create_index("gmail_message_id", unique=True)
             self.verification_logs.create_index([("order_id", 1), ("verified_at", -1)])
+            self.verification_logs.create_index("payment_references", unique=True, sparse=True)
             self._indexes_ready = True
         except PyMongoError as exc:
             raise DatabaseError("Unable to create MongoDB indexes.") from exc
@@ -100,14 +112,17 @@ class MongoRepository:
     def update_order_status(self, order_id: str, status: OrderStatus) -> Order:
         try:
             result = self.orders.find_one_and_update(
-                {"id": order_id},
+                {"id": order_id, "status": {"$in": ["pending", "expired"]}},
                 {"$set": {"status": status}},
                 return_document=ReturnDocument.AFTER,
             )
         except PyMongoError as exc:
             raise DatabaseError("Unable to update order status.") from exc
         if not result:
-            raise OrderNotFoundError(f"Order '{order_id}' was not found.")
+            current = self.get_order(order_id)
+            if current.status == status:
+                return current
+            raise OrderStateError("Order state changed while processing payment.")
         return Order.from_record(result)
 
     def save_verification_log(
@@ -117,16 +132,34 @@ class MongoRepository:
         gmail_message_id: str,
         purpose: str,
         gmail_message_timestamp: datetime,
-    ) -> None:
+        amount: str | None = None,
+        utr: str | None = None,
+        transaction_id: str | None = None,
+        sender_name: str | None = None,
+        payment_time_ist: str | None = None,
+    ) -> bool:
         record = VerificationLogRecord(
             order_id=order_id,
             gmail_message_id=gmail_message_id,
             purpose=purpose,
             verified_at=utcnow(),
             gmail_message_timestamp=ensure_utc(gmail_message_timestamp),
+            amount=amount,
+            utr=utr,
+            transaction_id=transaction_id,
+            sender_name=sender_name,
+            payment_time_ist=payment_time_ist,
         )
         try:
-            self.verification_logs.insert_one(record.to_dict())
+            document = record.to_dict()
+            document["payment_references"] = list({r for r in (utr, transaction_id) if r})
+            self.verification_logs.insert_one(document)
+            return True
+        except DuplicateKeyError:
+            # A concurrent verifier may have claimed the same order/message.
+            # The caller reloads the winning proof, never marks an unclaimed
+            # order verified.
+            return False
         except PyMongoError as exc:
             raise DatabaseError("Unable to save verification log.") from exc
 
@@ -135,3 +168,38 @@ class MongoRepository:
             return self.verification_logs.find_one({"gmail_message_id": gmail_message_id}) is not None
         except PyMongoError as exc:
             raise DatabaseError("Unable to check verification log.") from exc
+
+    def get_verification_log(self, order_id: str) -> dict[str, Any] | None:
+        """Return the latest verification record for an order, if present."""
+
+        try:
+            return self.verification_logs.find_one(
+                {"order_id": order_id},
+                sort=[("verified_at", -1)],
+            )
+        except PyMongoError as exc:
+            raise DatabaseError("Unable to read verification log.") from exc
+
+    def get_verification_log_by_message(self, message_id: str) -> dict[str, Any] | None:
+        try:
+            return self.verification_logs.find_one({"gmail_message_id": message_id})
+        except PyMongoError as exc:
+            raise DatabaseError("Unable to read verification log.") from exc
+
+    def message_used_by_other_order(self, message_id: str, order_id: str) -> bool:
+        return self.verification_logs.find_one({
+            "gmail_message_id": message_id, "order_id": {"$ne": order_id},
+        }) is not None
+
+    def amount_match_is_unambiguous(self, order: Order, timestamp: datetime) -> bool:
+        """A note-less credit cannot select between two same-amount orders.
+
+        Include completed/cancelled orders too: their late emails must not be
+        reassigned to a newer customer's order.
+        """
+        return self.orders.find_one({
+            "id": {"$ne": order.id},
+            "amount": str(order.amount),
+            "created_at": {"$lte": timestamp},
+            "expires_at": {"$gte": timestamp},
+        }) is None

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
-from datetime import timedelta, timezone
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .config import AppConfig
 from .database import MongoRepository
-from .exceptions import OrderNotFoundError, OrderStateError, VerificationError
+from .exceptions import OrderStateError, VerificationError
 from .gmail import GmailService
 from .models import Order, VerificationResult
 from .purpose import generate_purpose
@@ -18,7 +19,11 @@ from .utils import generate_order_id, parse_amount, utcnow
 
 # Regex patterns for extracting payment details from email text
 _UTR_RE = re.compile(
-    r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?|Ref(?:\.?\s*No)?|Transaction\s*No)[:\s\-/]+([A-Za-z0-9]{8,})",
+    r"\b(?:UTR|RRN|UPI\s*Ref(?:erence)?(?:\s*No)?|Ref(?:\.?\s*No)?|Reference(?:\.?\s*No)?|Transaction\s*(?:Id|No)|Txn\s*(?:Id|No))[:\s\-/]+([A-Za-z0-9]{8,})",
+    re.I,
+)
+_TXN_RE = re.compile(
+    r"\b(?:Txn\s*(?:Id|No)?|Transaction\s*(?:Id|No)?|Reference(?:\.?\s*No)?|Ref(?:\.?\s*No)?)[:\s\-/]+([A-Za-z0-9]{8,})",
     re.I,
 )
 _SENDER_RE = re.compile(
@@ -41,19 +46,33 @@ def _extract_payment_details(email_text: str) -> dict:
     """Extract UTR and sender name from email subject+body text."""
     utr_match = _UTR_RE.search(email_text)
     utr = (utr_match.group(1).strip() if utr_match else "").strip()
+    txn_match = _TXN_RE.search(email_text)
+    transaction_id = (txn_match.group(1).strip() if txn_match else "").strip()
     sender_match = _SENDER_RE.search(email_text)
     sender = ""
     if sender_match:
         sender = sender_match.group(1).strip()
         sender = re.sub(r"^(your|the)\s+", "", sender, flags=re.I).strip(_STRIP_CHARS)
-    return {"utr": utr, "sender_name": sender or "Unknown"}
+    return {
+        "utr": utr,
+        "transaction_id": transaction_id or utr,
+        "sender_name": sender or "Unknown",
+    }
 
 
 class PaymentManager:
     """A lightweight payment verification SDK for FamApp-style flows."""
 
-    def __init__(self) -> None:
-        self._config = AppConfig.from_env()
+    def __init__(
+        self,
+        *,
+        default_upi_id: str | None = None,
+        default_payee_name: str | None = None,
+    ) -> None:
+        self._config = AppConfig.from_env(
+            default_upi_id=default_upi_id,
+            default_payee_name=default_payee_name,
+        )
         self._repository = MongoRepository(self._config)
         self._gmail = GmailService(self._config)
 
@@ -101,16 +120,31 @@ class PaymentManager:
     def verify(self, order_id: str) -> dict[str, Any]:
         """Verify a pending order using IMAP and purpose matching."""
 
+        order_id = str(order_id or "").strip()
+        if not order_id:
+            raise VerificationError("order_id is required.")
+
         order = self._repository.get_order(order_id)
         if order.status == "cancelled":
             raise OrderStateError("Cancelled orders cannot be verified.")
         if order.status == "verified":
-            return VerificationResult(
+            result = VerificationResult(
                 order_id=order.id,
                 verified=True,
                 status="verified",
                 message="Order is already verified.",
             ).to_dict()
+            previous = self._repository.get_verification_log(order.id)
+            if previous:
+                result.update({
+                    key: previous[key]
+                    for key in (
+                        "gmail_message_id", "purpose", "amount", "utr",
+                        "transaction_id", "sender_name", "payment_time_ist",
+                    )
+                    if key in previous and previous[key] is not None
+                })
+            return result
 
         now = utcnow()
         if now >= order.expires_at:
@@ -129,6 +163,17 @@ class PaymentManager:
             expected_amount=order.amount,
         )
 
+        # If the UPI app stripped the purpose note, only accept the amount
+        # fallback when no other live order could have produced that email.
+        if (
+            message is not None
+            and message.purpose is None
+            and not self._repository.amount_match_is_unambiguous(
+                order, message.timestamp
+            )
+        ):
+            message = None
+
         if message is None:
             return VerificationResult(
                 order_id=order.id,
@@ -137,7 +182,28 @@ class PaymentManager:
                 message="No matching payment email was found.",
             ).to_dict()
 
-        if self._repository.message_already_processed(message.message_id):
+        existing_log = self._repository.get_verification_log_by_message(message.message_id)
+        if existing_log:
+            if existing_log.get("order_id") == order.id:
+                # The log may have been committed immediately before a worker
+                # crashed while updating the order. Reconcile that safe state.
+                updated_order = self._repository.update_order_status(order.id, "verified")
+                result = VerificationResult(
+                    order_id=updated_order.id,
+                    verified=True,
+                    status="verified",
+                    message="Payment verified successfully.",
+                    gmail_message_id=message.message_id,
+                    purpose=updated_order.purpose,
+                    amount=order.amount,
+                    verified_at=utcnow(),
+                ).to_dict()
+                result.update({
+                    key: existing_log[key]
+                    for key in ("utr", "transaction_id", "sender_name", "payment_time_ist")
+                    if existing_log.get(key) is not None
+                })
+                return result
             return VerificationResult(
                 order_id=order.id,
                 verified=False,
@@ -148,17 +214,43 @@ class PaymentManager:
                 amount=str(order.amount),
             ).to_dict()
 
-        updated_order = self._repository.update_order_status(order.id, "verified")
-        self._repository.save_verification_log(
-            order_id=updated_order.id,
-            gmail_message_id=message.message_id,
-            purpose=updated_order.purpose,
-            gmail_message_timestamp=message.timestamp,
-        )
-
         # Extract UTR and sender name from the email text
         combined_text = f"{message.subject}\n{message.body}"
         details = _extract_payment_details(combined_text)
+        payment_time_ist = message.timestamp.astimezone(
+            ZoneInfo("Asia/Kolkata")
+        ).strftime("%d-%m-%Y %H:%M:%S")
+
+        # Persist the details used by the bot before returning them.  This
+        # makes a retry after a Telegram/network failure idempotent instead of
+        # producing a second key with an empty transaction reference.
+        utr = details["utr"] or f"FP-{message.message_id[:12]}"
+        transaction_id = details["transaction_id"] or utr
+        saved = self._repository.save_verification_log(
+            order_id=order.id,
+            gmail_message_id=message.message_id,
+            purpose=order.purpose,
+            gmail_message_timestamp=message.timestamp,
+            amount=str(order.amount),
+            utr=utr,
+            transaction_id=transaction_id,
+            sender_name=details["sender_name"],
+            payment_time_ist=payment_time_ist,
+        )
+        if saved is False:
+            # A competing order claimed this reference/message. Do not mark
+            # this order verified or deliver anything from it.
+            return VerificationResult(
+                order_id=order.id,
+                verified=False,
+                status="pending",
+                message="Matching payment reference was already processed.",
+                gmail_message_id=message.message_id,
+                purpose=message.purpose,
+                amount=str(order.amount),
+            ).to_dict()
+
+        updated_order = self._repository.update_order_status(order.id, "verified")
 
         result = VerificationResult(
             order_id=updated_order.id,
@@ -167,14 +259,15 @@ class PaymentManager:
             message="Payment verified successfully.",
             gmail_message_id=message.message_id,
             purpose=updated_order.purpose,
+            amount=order.amount,
             verified_at=utcnow(),
         ).to_dict()
 
         # Enrich result with extracted payment details
-        result["utr"] = details["utr"] or f"FP-{message.message_id[:12]}"
-        result["transaction_id"] = details["utr"] or f"FP-{message.message_id[:12]}"
+        result["utr"] = utr
+        result["transaction_id"] = transaction_id
         result["sender_name"] = details["sender_name"]
-        result["payment_time_ist"] = message.timestamp.strftime("%d-%m-%Y %H:%M:%S")
+        result["payment_time_ist"] = payment_time_ist
 
         return result
 

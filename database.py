@@ -1,6 +1,4 @@
 import asyncio
-import io
-import json
 import logging
 from datetime import datetime, timedelta
 from typing import List, Tuple, Dict, Any, Optional
@@ -35,21 +33,39 @@ class DatabaseManager:
     # Internal helpers
     # ------------------------------------------------------------------
     def _init_indexes(self):
+        # A single stale/duplicate index must not prevent unrelated indexes
+        # from being created. This is especially important during migration
+        # from the old payment service.
         try:
-            self.db.products.create_index("name", unique=True)
-            self.db.keys.create_index("key_value", unique=True)
-            self.db.fund_requests.create_index("utr", unique=True, sparse=True)
-            self.db.fund_requests.create_index("order_id", unique=True, sparse=True)
-            self.db.users.create_index("verified")
-            self.db.users.create_index("total_spent")
-            self.db.plans.create_index("product_id")
-            self.db.keys.create_index([("plan_id", ASCENDING), ("is_sold", ASCENDING)])
-            self.db.purchases.create_index("user_id")
-            self.db.fund_requests.create_index("status")
-            self.db.tickets.create_index("status")
-            self.db.redeemed_promos.create_index([("user_id", ASCENDING), ("code", ASCENDING)], unique=True)
-        except Exception as e:
-            logger.warning(f"Index init warning: {e}")
+            self.db.fund_requests.update_many(
+                {"utr": None}, {"$unset": {"utr": ""}}
+            )
+            self.db.fund_requests.update_many(
+                {"transaction_id": None}, {"$unset": {"transaction_id": ""}}
+            )
+        except Exception as exc:
+            logger.warning(f"Payment reference cleanup warning: {exc}")
+
+        index_operations = [
+            ("products.name", lambda: self.db.products.create_index("name", unique=True)),
+            ("keys.key_value", lambda: self.db.keys.create_index("key_value", unique=True)),
+            ("fund_requests.utr", lambda: self.db.fund_requests.create_index("utr", unique=True, sparse=True)),
+            ("fund_requests.order_id", lambda: self.db.fund_requests.create_index("order_id", unique=True, sparse=True)),
+            ("fund_requests.transaction_id", lambda: self.db.fund_requests.create_index("transaction_id", unique=True, sparse=True)),
+            ("users.verified", lambda: self.db.users.create_index("verified")),
+            ("users.total_spent", lambda: self.db.users.create_index("total_spent")),
+            ("plans.product_id", lambda: self.db.plans.create_index("product_id")),
+            ("keys.plan_id/is_sold", lambda: self.db.keys.create_index([("plan_id", ASCENDING), ("is_sold", ASCENDING)])),
+            ("purchases.user_id", lambda: self.db.purchases.create_index("user_id")),
+            ("fund_requests.status", lambda: self.db.fund_requests.create_index("status")),
+            ("tickets.status", lambda: self.db.tickets.create_index("status")),
+            ("redeemed_promos.user_id/code", lambda: self.db.redeemed_promos.create_index([("user_id", ASCENDING), ("code", ASCENDING)], unique=True)),
+        ]
+        for name, operation in index_operations:
+            try:
+                operation()
+            except Exception as exc:
+                logger.warning(f"Index init warning for {name}: {exc}")
 
     async def _next_id(self, name: str) -> int:
         def _op():
@@ -512,7 +528,8 @@ class DatabaseManager:
     # Order-id based fund requests (used by the auto-UPI flow)
     # ------------------------------------------------------------------
     async def create_fund_request_with_order(self, user_id: int, order_id: str,
-                                       plan_id: int, amount: float) -> bool:
+                                       plan_id: int, amount: float,
+                                       order_type: Optional[str] = None) -> bool:
         def _op():
             if self.db.fund_requests.find_one({"order_id": order_id}): return False
             try:
@@ -520,10 +537,12 @@ class DatabaseManager:
                     {"_id": "fund_requests"}, {"$inc": {"seq": 1}},
                     upsert=True, return_document=ReturnDocument.AFTER
                 )
+                amount_paise = int(round(float(amount)))
                 self.db.fund_requests.insert_one({
                     "_id": next_f_doc["seq"], "user_id": user_id, "order_id": order_id,
                     "plan_id": int(plan_id) if plan_id is not None else None,
-                    "amount_requested": float(amount), "utr": None, "transaction_id": None,
+                    "order_type": order_type or ("FUND" if plan_id is None else "PRODUCT"),
+                    "amount_requested": amount_paise,
                     "sender_name": None, "payment_time": None, "status": "PENDING",
                     "request_date": datetime.now().isoformat(), "resolved_date": None,
                 })
@@ -563,6 +582,164 @@ class DatabaseManager:
             q = {"utr": utr}
             if except_order_id: q["order_id"] = {"$ne": except_order_id}
             return self.db.fund_requests.find_one(q) is not None
+        return await asyncio.to_thread(_op)
+
+    async def is_payment_reference_already_used(
+        self, reference: str, except_order_id: Optional[str] = None
+    ) -> bool:
+        """Check both UTR and transaction-id fields for replayed payments."""
+
+        def _op():
+            if not reference:
+                return False
+            query: Dict[str, Any] = {
+                "$or": [{"utr": reference}, {"transaction_id": reference}]
+            }
+            if except_order_id:
+                query["order_id"] = {"$ne": except_order_id}
+            return self.db.fund_requests.find_one(query) is not None
+
+        return await asyncio.to_thread(_op)
+
+    async def begin_payment_fulfillment(
+        self,
+        order_id: str,
+        *,
+        utr: Optional[str] = None,
+        transaction_id: Optional[str] = None,
+        sender_name: Optional[str] = None,
+        payment_time: Optional[str] = None,
+    ) -> Tuple[bool, dict]:
+        """Atomically claim a pending payment for one fulfillment attempt.
+
+        Telegram can deliver the same callback more than once.  Moving the
+        request from PENDING to PROCESSING in a conditional update makes only
+        the first callback eligible to add funds or consume a key.
+        """
+
+        def _op():
+            sets = {"status": "PROCESSING"}
+            if transaction_id is not None:
+                sets["transaction_id"] = transaction_id
+            if sender_name is not None:
+                sets["sender_name"] = sender_name
+            if payment_time is not None:
+                sets["payment_time"] = payment_time
+            if utr:
+                sets["utr"] = utr
+            try:
+                claimed = self.db.fund_requests.find_one_and_update(
+                    {"order_id": order_id, "status": "PENDING"},
+                    {"$set": sets},
+                    return_document=ReturnDocument.AFTER,
+                )
+            except DuplicateKeyError:
+                return False, {"status": "REJECTED_DUPLICATE_UTR"}
+            if claimed:
+                return True, self._wrap(claimed)
+            current = self.db.fund_requests.find_one({"order_id": order_id})
+            return False, self._wrap(current)
+
+        return await asyncio.to_thread(_op)
+
+    async def approve_fund_request(
+        self,
+        order_id: str,
+        *,
+        utr: Optional[str] = None,
+        transaction_id: Optional[str] = None,
+        sender_name: Optional[str] = None,
+        payment_time: Optional[str] = None,
+    ) -> Tuple[bool, dict]:
+        """Credit a wallet top-up once and mark its request approved."""
+
+        def _op():
+            sets = {"status": "PROCESSING"}
+            if transaction_id is not None:
+                sets["transaction_id"] = transaction_id
+            if sender_name is not None:
+                sets["sender_name"] = sender_name
+            if payment_time is not None:
+                sets["payment_time"] = payment_time
+            if utr:
+                sets["utr"] = utr
+
+            def current_request():
+                return self._wrap(self.db.fund_requests.find_one({"order_id": order_id}))
+
+            # MongoDB deployments used by Render are replica sets, so use a
+            # transaction when available. This keeps the wallet increment and
+            # request status change together.
+            try:
+                with self.client.start_session() as session:
+                    with session.start_transaction():
+                        request = self.db.fund_requests.find_one_and_update(
+                            {"order_id": order_id, "status": "PENDING"},
+                            {"$set": sets},
+                            return_document=ReturnDocument.AFTER,
+                            session=session,
+                        )
+                        if not request:
+                            return False, current_request()
+                        user_id = request.get("user_id")
+                        amount = int(round(float(request.get("amount_requested", 0))))
+                        user_result = self.db.users.update_one(
+                            {"_id": user_id}, {"$inc": {"balance": amount}},
+                            session=session,
+                        )
+                        if user_result.matched_count != 1:
+                            raise RuntimeError("User for payment request was not found.")
+                        self.db.fund_requests.update_one(
+                            {"order_id": order_id, "status": "PROCESSING"},
+                            {"$set": {
+                                "status": "APPROVED",
+                                "resolved_date": datetime.now().isoformat(),
+                            }},
+                            session=session,
+                        )
+                        request["status"] = "APPROVED"
+                        request["amount_requested"] = amount
+                        return True, request
+            except DuplicateKeyError:
+                return False, {"status": "REJECTED_DUPLICATE_UTR"}
+            except Exception as transaction_error:
+                # Standalone MongoDB and mongomock do not support sessions.
+                # Retain a safe conditional fallback for those deployments.
+                logger.warning(f"Wallet transaction unavailable; using guarded fallback: {transaction_error}")
+
+            request = self.db.fund_requests.find_one_and_update(
+                {"order_id": order_id, "status": "PENDING"},
+                {"$set": sets},
+                return_document=ReturnDocument.AFTER,
+            )
+            if not request:
+                return False, current_request()
+
+            user_id = request.get("user_id")
+            amount = int(round(float(request.get("amount_requested", 0))))
+            user_result = self.db.users.update_one(
+                {"_id": user_id}, {"$inc": {"balance": amount}}
+            )
+            if user_result.matched_count != 1:
+                self.db.fund_requests.update_one(
+                    {"order_id": order_id, "status": "PROCESSING"},
+                    {"$set": {
+                        "status": "PAYMENT_ERROR",
+                        "resolved_date": datetime.now().isoformat(),
+                    }},
+                )
+                return False, {"status": "PAYMENT_ERROR"}
+            self.db.fund_requests.update_one(
+                {"order_id": order_id, "status": "PROCESSING"},
+                {"$set": {
+                    "status": "APPROVED",
+                    "resolved_date": datetime.now().isoformat(),
+                }},
+            )
+            request["status"] = "APPROVED"
+            request["amount_requested"] = amount
+            return True, request
+
         return await asyncio.to_thread(_op)
 
     # ------------------------------------------------------------------
@@ -612,6 +789,7 @@ class DatabaseManager:
                 "users", "products", "plans", "keys", "purchases",
                 "fund_requests", "tickets", "admin_logs", "settings",
                 "promo_codes", "redeemed_promos", "counters",
+                "orders", "verification_logs",
             ]
             for col in collections: snapshot[col] = list(self.db[col].find({}))
             return bson_dumps(snapshot, indent=2).encode("utf-8")

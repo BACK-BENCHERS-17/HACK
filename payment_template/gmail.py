@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import email
+import html
 from email import policy
 from email.message import Message
 from email.utils import parsedate_to_datetime
@@ -18,14 +19,36 @@ from .exceptions import GmailError
 from .utils import utcnow
 
 
-INCOMING_SUBJECT_RE = re.compile(r"you received ₹.* in your famx account", re.IGNORECASE)
-INCOMING_BODY_RE = re.compile(r"you have successfully received", re.IGNORECASE)
-OUTGOING_SUBJECT_RE = re.compile(r"your payment of ₹.* is successful", re.IGNORECASE)
-OUTGOING_BODY_RE = re.compile(r"you have successfully paid", re.IGNORECASE)
+INCOMING_SUBJECT_RE = re.compile(
+    r"(?:you\s+(?:have\s+)?received|payment\s+received|money\s+received|credited)"
+    r".{0,120}(?:fam(?:app|pay|x)|account)",
+    re.IGNORECASE,
+)
+INCOMING_BODY_RE = re.compile(
+    r"(?:you\s+(?:have\s+)?(?:successfully\s+)?received|"
+    r"successfully\s+received|"
+    r"money\s+received|payment\s+received|credited\s+to\s+your|"
+    r"added\s+to\s+your|amount\s+received)",
+    re.IGNORECASE,
+)
+OUTGOING_SUBJECT_RE = re.compile(
+    r"(?:your\s+payment|you\s+(?:paid|sent)|debited|money\s+sent).{0,100}"
+    r"(?:successful|success|completed|debited)",
+    re.IGNORECASE,
+)
+OUTGOING_BODY_RE = re.compile(
+    r"(?:your\s+payment.{0,100}(?:successful|success|completed|debited)|"
+    r"you\s+(?:paid|sent)|debited|money\s+sent|spent\s+on)",
+    re.IGNORECASE,
+)
 # NOTE: the purpose prefix is configurable (AppConfig.purpose_prefix), so the
 # matching pattern is built per-instance in GmailService._purpose_pattern()
 # instead of being hardcoded here.
-AMOUNT_RE = re.compile(r"₹\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
+AMOUNT_RE = re.compile(
+    r"(?:₹|Rs\.?|INR|Amount|Amt)\s*[:\-]?\s*"
+    r"([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -38,6 +61,7 @@ class GmailMessage:
     timestamp: datetime
     purpose: str | None
     amount: Decimal | None
+    amounts: tuple[Decimal, ...] = ()
 
     @property
     def is_incoming_payment(self) -> bool:
@@ -48,9 +72,15 @@ class GmailMessage:
 
         if OUTGOING_SUBJECT_RE.search(subject) or OUTGOING_BODY_RE.search(body):
             return False
-        if not INCOMING_SUBJECT_RE.search(subject):
+        incoming_signal = (
+            INCOMING_SUBJECT_RE.search(subject)
+            or INCOMING_BODY_RE.search(body)
+        )
+        if not incoming_signal:
             return False
-        if not INCOMING_BODY_RE.search(body):
+        # A debit mail can contain generic words such as "successful".  Only
+        # let it through when it also has an unambiguous credit phrase.
+        if OUTGOING_BODY_RE.search(body) and not INCOMING_BODY_RE.search(body):
             return False
         return self.purpose is not None
 
@@ -61,7 +91,9 @@ class GmailService:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         prefix = re.escape((config.purpose_prefix or "PS").upper())
-        self._purpose_re = re.compile(rf"\b{prefix}-[A-Z0-9]{{8}}-[A-Z0-9]{{6}}\b")
+        self._purpose_re = re.compile(
+            rf"\b{prefix}-[A-Z0-9]{{8}}-[A-Z0-9]{{6}}\b", re.IGNORECASE
+        )
 
     def _connect(self) -> imaplib.IMAP4_SSL:
         try:
@@ -108,7 +140,7 @@ class GmailService:
                         text = self._decode_bytes(payload)
                     if text:
                         collected.append(str(text))
-            return "\\n".join(collected)
+            return "\n".join(collected)
 
         try:
             content = message.get_content()
@@ -117,15 +149,17 @@ class GmailService:
             return self._decode_bytes(payload)
         return str(content) if content is not None else ""
 
-    def _parse_amount(self, text: str) -> Decimal | None:
-        match = AMOUNT_RE.search(text)
-        if not match:
-            return None
-        normalized = match.group(1).replace(",", "")
-        try:
-            return Decimal(normalized).quantize(Decimal("0.01"))
-        except (InvalidOperation, ValueError):
-            return None
+    def _parse_amounts(self, text: str) -> tuple[Decimal, ...]:
+        amounts: list[Decimal] = []
+        for match in AMOUNT_RE.finditer(text):
+            normalized = match.group(1).replace(",", "")
+            try:
+                value = Decimal(normalized).quantize(Decimal("0.01"))
+            except (InvalidOperation, ValueError):
+                continue
+            if value not in amounts:
+                amounts.append(value)
+        return tuple(amounts)
 
     def _parse_timestamp(self, message: Message) -> datetime:
         date_header = message.get("Date")
@@ -142,19 +176,23 @@ class GmailService:
     def _parse_message(self, raw: bytes, message_id: str) -> GmailMessage:
         message = email.message_from_bytes(raw, policy=policy.default)
         subject = str(message.get("Subject", ""))
-        body = self._extract_text_from_message(message)
+        stable_message_id = str(message.get("Message-ID", "")).strip().strip("<>") or message_id
+        body = html.unescape(self._extract_text_from_message(message))
+        body = re.sub(r"<[^>]+>", " ", body)
+        body = re.sub(r"\s+", " ", body).strip()
         timestamp = self._parse_timestamp(message)
-        combined_text = f"{subject}\\n{body}"
+        combined_text = f"{subject}\n{body}"
         purpose_match = self._purpose_re.search(combined_text)
         purpose = purpose_match.group(0) if purpose_match else None
-        amount = self._parse_amount(combined_text)
+        amounts = self._parse_amounts(combined_text)
         return GmailMessage(
-            message_id=message_id,
+            message_id=stable_message_id,
             subject=subject,
             body=body,
             timestamp=timestamp,
             purpose=purpose,
-            amount=amount,
+            amount=amounts[0] if amounts else None,
+            amounts=amounts,
         )
 
     def _fetch_mailbox_messages(self, *, lookback_hours: int, max_results: int) -> list[GmailMessage]:
@@ -172,7 +210,12 @@ class GmailService:
                 raise GmailError(f"Unable to select IMAP mailbox '{self._config.imap_mailbox}'.")
 
             try:
-                status, data = client.search(None, "FROM", self._config.imap_sender_filter, "SINCE", search_date)
+                if self._config.imap_sender_filter:
+                    status, data = client.search(
+                        None, "FROM", self._config.imap_sender_filter, "SINCE", search_date
+                    )
+                else:
+                    status, data = client.search(None, "SINCE", search_date)
             except imaplib.IMAP4.error as exc:
                 raise GmailError("Unable to query Gmail IMAP.") from exc
             if status != "OK":
@@ -242,15 +285,21 @@ class GmailService:
 
         messages = self.search_incoming_payments(lookback_hours=lookback_hours)
 
+        def amount_matches(message: GmailMessage) -> bool:
+            available = message.amounts or ((message.amount,) if message.amount is not None else ())
+            return expected_amount in available
+
+        expected_purpose_normalized = expected_purpose.casefold()
+
         # Pass 1: strict purpose + amount match (safest).
         for message in messages:
             if message.timestamp < cutoff or message.timestamp < order_created_at:
                 continue
             if not message.is_incoming_payment:
                 continue
-            if message.purpose != expected_purpose:
+            if not message.purpose or message.purpose.casefold() != expected_purpose_normalized:
                 continue
-            if message.amount != expected_amount:
+            if not amount_matches(message):
                 continue
             return message
 
@@ -266,7 +315,7 @@ class GmailService:
                 continue
             if not INCOMING_SUBJECT_RE.search(subject) or not INCOMING_BODY_RE.search(body):
                 continue
-            if message.amount != expected_amount:
+            if not amount_matches(message):
                 continue
             return message
 
