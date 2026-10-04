@@ -8,6 +8,7 @@ Payment: FamPay SDK (PaymentManager) for UPI QR + Gmail IMAP verification.
 import asyncio
 import html
 import io
+import inspect
 import logging
 import math
 import os
@@ -3073,6 +3074,35 @@ async def receive_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==============================================================================
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    polling_conflict = {"detected": False}
+
+    def mark_polling_conflict(error):
+        """Stop this process when another instance owns Telegram polling."""
+        if not isinstance(error, Conflict):
+            return
+        polling_conflict["detected"] = True
+        logger.error(
+            "Telegram polling conflict detected; stopping this instance so the "
+            "supervisor can restart it. Only one process may use this bot token."
+        )
+        # This is intentionally synchronous: PTB invokes polling error
+        # callbacks from its network loop. stop_running() performs the normal
+        # run_polling cleanup without leaving a zombie polling task.
+        app.stop_running()
+
+    async def application_error_handler(update, context):
+        """Handle conflicts on PTB versions that route polling errors here."""
+        error = context.error
+        if isinstance(error, Conflict):
+            mark_polling_conflict(error)
+            return
+        logger.error("Unhandled Telegram application error: %s", error)
+
+    # PTB 21.x forwards updater errors to registered application error
+    # handlers, while newer PTB releases expose run_polling(error_callback).
+    # Register both paths so deployments do not keep retrying a lost poll
+    # forever after a Render restart overlap.
+    app.add_error_handler(application_error_handler)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", cmd_admin))
@@ -3188,7 +3218,16 @@ def main():
     ))
 
     logger.info("🔥 Bot is starting (MongoDB + in-process FamPay verification) 🔥")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    polling_kwargs = {
+        "allowed_updates": Update.ALL_TYPES,
+        "drop_pending_updates": True,
+        "bootstrap_retries": 6,
+    }
+    if "error_callback" in inspect.signature(app.run_polling).parameters:
+        polling_kwargs["error_callback"] = mark_polling_conflict
+    app.run_polling(**polling_kwargs)
+    if polling_conflict["detected"]:
+        raise Conflict("Another process is polling this bot token.")
 
 if __name__ == "__main__":
     # Retry-guard: during Render deploys the old instance can still be polling
