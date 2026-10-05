@@ -68,8 +68,9 @@ class PaymentManager:
         *,
         default_upi_id: str | None = None,
         default_payee_name: str | None = None,
+        config: AppConfig | None = None,
     ) -> None:
-        self._config = AppConfig.from_env(
+        self._config = config or AppConfig.from_env(
             default_upi_id=default_upi_id,
             default_payee_name=default_payee_name,
         )

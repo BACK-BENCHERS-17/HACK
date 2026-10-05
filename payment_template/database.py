@@ -86,6 +86,16 @@ class MongoRepository:
         except PyMongoError as exc:
             raise DatabaseError("Unable to create MongoDB indexes.") from exc
 
+    def check_storage(self) -> None:
+        """Check SDK storage, including indexes that failed on a prior attempt."""
+        try:
+            self.db.command("ping")
+            # _connect may have set _db before an index creation failed. Do
+            # not let that cached DB handle make the next check report READY.
+            self._ensure_indexes()
+        except PyMongoError as exc:
+            raise DatabaseError("Unable to check payment storage.") from exc
+
     @property
     def orders(self) -> Collection:
         return self.db["orders"]

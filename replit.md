@@ -50,8 +50,10 @@ The following are loaded from environment with fallbacks already hardcoded in `c
 - `ADMIN_IDS` — Comma-separated Telegram admin user IDs
 - `MONGO_URI` or `MONGODB_URI` — MongoDB connection string
 - `MONGO_DB_NAME` or `DB_NAME` — MongoDB database name (default: `hack_store_enterprise`)
-- `DEFAULT_UPI_ID` / `DEFAULT_PAYEE_NAME` — environment defaults; the admin UPI setting in MongoDB is used for generated orders.
-- `IMAP_USERNAME` / `IMAP_APP_PASSWORD` — Gmail account and Google app password used for FamApp/FamPay credit alerts.
+- Payment setup: **/admin → UPI Session** in the owner's private chat. UPI ID,
+  payee name, Gmail account/App Password and mailbox are saved in MongoDB.
+- `DEFAULT_UPI_ID` / `DEFAULT_PAYEE_NAME` — optional defaults; saved bot settings take precedence.
+- `IMAP_USERNAME` / `IMAP_APP_PASSWORD` — optional legacy fallbacks; use Connect / Change Gmail in the bot to configure them instead.
 - `IMAP_SENDER_FILTER` — IMAP sender search text (default: `fam`).
 
 To override the defaults in production, set these as Replit Secrets before publishing.

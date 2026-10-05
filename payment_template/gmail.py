@@ -97,7 +97,7 @@ class GmailService:
 
     def _connect(self) -> imaplib.IMAP4_SSL:
         try:
-            client = imaplib.IMAP4_SSL(self._config.imap_host, self._config.imap_port)
+            client = imaplib.IMAP4_SSL(self._config.imap_host, self._config.imap_port, timeout=15)
         except Exception as exc:  # noqa: BLE001
             raise GmailError(
                 f"Unable to connect to IMAP server {self._config.imap_host}:{self._config.imap_port}."
@@ -105,14 +105,33 @@ class GmailService:
 
         try:
             status, _ = client.login(self._config.imap_username, self._config.imap_app_password)
-        except imaplib.IMAP4.error as exc:
+            if status != "OK":
+                raise imaplib.IMAP4.error("IMAP login failed.")
+        except (imaplib.IMAP4.error, OSError) as exc:
+            try:
+                client.logout()
+            except Exception:
+                pass
             raise GmailError(
                 "Unable to authenticate to Gmail IMAP. Use your Google Account email address and an app password from myaccount.google.com/apppasswords."
             ) from exc
-
-        if status != "OK":
-            raise GmailError("IMAP login failed.")
         return client
+
+    def check_connection(self) -> None:
+        """Check login and mailbox access without consuming payment emails."""
+        client = self._connect()
+        try:
+            mailbox = '"' + self._config.imap_mailbox.replace('\\', '\\\\').replace('"', '\\"') + '"'
+            status, _ = client.select(mailbox, readonly=True)
+            if status != "OK":
+                raise GmailError("Mailbox could not be opened. Check the Mailbox setting.")
+        except (imaplib.IMAP4.error, OSError) as exc:
+            raise GmailError("Unable to open the configured mailbox. Check Mailbox and try again.") from exc
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
 
     def _decode_bytes(self, value: bytes | None) -> str:
         if not value:
@@ -203,7 +222,8 @@ class GmailService:
         client = self._connect()
         try:
             try:
-                status, _ = client.select(self._config.imap_mailbox)
+                mailbox = '"' + self._config.imap_mailbox.replace('\\', '\\\\').replace('"', '\\"') + '"'
+                status, _ = client.select(mailbox, readonly=True)
             except imaplib.IMAP4.error as exc:
                 raise GmailError(f"Unable to select IMAP mailbox '{self._config.imap_mailbox}'.") from exc
             if status != "OK":

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 import re
 
@@ -26,7 +26,7 @@ def _parse_int(value: str, name: str) -> int:
 class AppConfig:
     """Runtime configuration resolved from environment variables."""
 
-    mongodb_uri: str
+    mongodb_uri: str = field(repr=False)
     db_name: str
     default_upi_id: str
     default_payee_name: str = "Project Stack"
@@ -37,7 +37,7 @@ class AppConfig:
     imap_host: str = "imap.gmail.com"
     imap_port: int = 993
     imap_username: str = ""
-    imap_app_password: str = ""
+    imap_app_password: str = field(default="", repr=False)
     imap_mailbox: str = "INBOX"
     imap_sender_filter: str = "fam"
 
@@ -47,6 +47,9 @@ class AppConfig:
         *,
         default_upi_id: str | None = None,
         default_payee_name: str | None = None,
+        imap_username: str | None = None,
+        imap_app_password: str | None = None,
+        imap_mailbox: str | None = None,
     ) -> "AppConfig":
         """Load the SDK configuration from environment variables and .env files."""
 
@@ -88,13 +91,13 @@ class AppConfig:
         imap_port = _parse_int(os.getenv("IMAP_PORT", "993"), "IMAP_PORT")
 
         imap_host = os.getenv("IMAP_HOST", "imap.gmail.com").strip() or "imap.gmail.com"
-        imap_username = os.getenv("IMAP_USERNAME", "").strip()
+        imap_username = (imap_username if imap_username is not None else os.getenv("IMAP_USERNAME", "")).strip()
         # Google displays app passwords with spaces; IMAP expects the compact
         # 16-character value.
         imap_app_password = re.sub(
-            r"\s+", "", os.getenv("IMAP_APP_PASSWORD", "").strip()
+            r"\s+", "", imap_app_password if imap_app_password is not None else os.getenv("IMAP_APP_PASSWORD", "")
         )
-        imap_mailbox = os.getenv("IMAP_MAILBOX", "INBOX").strip() or "INBOX"
+        imap_mailbox = (imap_mailbox if imap_mailbox is not None else os.getenv("IMAP_MAILBOX", "INBOX")).strip() or "INBOX"
         imap_sender_filter = os.getenv("IMAP_SENDER_FILTER", "fam").strip() or "fam"
 
         if not imap_username:

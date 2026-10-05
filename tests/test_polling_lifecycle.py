@@ -7,6 +7,7 @@ import asyncio
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import types
 import unittest
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -28,8 +29,19 @@ def load_bot():
         "bot_under_test", Path(__file__).resolve().parents[1] / "bot.py"
     )
     module = importlib.util.module_from_spec(spec)
-    with patch.dict("sys.modules", {"config": config, "database": database}):
+    # Restore only our two injected modules. patch.dict(sys.modules) also
+    # removes dependencies imported by bot.py, causing duplicate SDK/Pillow
+    # module instances (and mocks attached to the wrong GmailService class).
+    originals = {name: sys.modules.get(name) for name in ("config", "database")}
+    sys.modules.update(config=config, database=database)
+    try:
         spec.loader.exec_module(module)
+    finally:
+        for name, original in originals.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
     return module
 
 

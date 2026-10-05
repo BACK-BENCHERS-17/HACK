@@ -19,14 +19,8 @@ services:
         sync: false
       - key: MONGO_DB_NAME
         value: hack_store_enterprise
-      - key: DEFAULT_UPI_ID
-        sync: false
       - key: DEFAULT_PAYEE_NAME
         value: Hack Store
-      - key: IMAP_USERNAME
-        sync: false
-      - key: IMAP_APP_PASSWORD
-        sync: false
       - key: IMAP_HOST
         value: imap.gmail.com
       - key: IMAP_PORT

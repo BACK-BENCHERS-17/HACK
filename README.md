@@ -7,10 +7,41 @@ pip install -r requirements.txt
 bash start.sh
 ```
 
-Set `BOT_TOKEN`, `ADMIN_IDS`, `MONGO_URI`, `IMAP_USERNAME`, and
-`IMAP_APP_PASSWORD` in your deployment's environment. The database defaults to
-`hack_store_enterprise`; set `MONGO_DB_NAME` to override it. Configure the payee
-UPI ID in the bot's admin panel.
+Set `BOT_TOKEN`, `ADMIN_IDS`, and `MONGO_URI` in your deployment's environment.
+The database defaults to `hack_store_enterprise`; set `MONGO_DB_NAME` to override it.
+
+## Configure payments directly in the bot
+
+In a **private chat**, the owner opens **`/admin → UPI Session`**:
+
+1. **Set UPI ID** — enter the receiving UPI address, such as `yourname@fam`.
+2. **Payee Name** — enter the store/payee name shown on payment QRs.
+3. **Connect / Change Gmail** — enter the account receiving FamApp credit
+   alerts, followed by its 16-letter **Google App Password**. Spaces are accepted.
+   Enable 2-Step Verification and create the App Password at
+   <https://myaccount.google.com/apppasswords>.
+4. **Mailbox** — defaults to `INBOX`. Select `[Gmail]/All Mail` if alerts are
+   archived there.
+5. **Test Connection / Refresh** — checks Gmail login/mailbox access and MongoDB,
+   and shows which setup fields are missing.
+
+The MongoDB line checks the bot's database connection. **Payment storage** is a
+separate check for the SDK connection and required payment indexes/permissions.
+A payment-storage error does not turn a working MongoDB connection into
+`DISCONNECTED`.
+
+The bot tests a new Gmail login before replacing the saved account. Settings
+are stored in MongoDB and reloaded for QR creation and verification without a
+restart. The password is encrypted using a key derived from `BOT_TOKEN`, and
+its chat message is deleted when possible. Reconnect Gmail after rotating the
+bot token. Passwords are never displayed in the panel or admin logs.
+
+Only configured owners can view/change payment configuration; staff cannot.
+Use **Cancel Process** or `/cancel` during setup to leave it unchanged.
+`IMAP_USERNAME`, `IMAP_APP_PASSWORD`, `DEFAULT_UPI_ID`, and `DEFAULT_PAYEE_NAME`
+remain optional environment fallbacks for older deployments; saved bot settings
+take precedence. An App Password is required for Gmail IMAP, not a normal
+Google account password.
 
 ## Render deployment
 

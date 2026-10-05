@@ -6,6 +6,8 @@ Payment: FamPay SDK (PaymentManager) for UPI QR + Gmail IMAP verification.
 """
 
 import asyncio
+import base64
+import hashlib
 import html
 import io
 import json
@@ -20,10 +22,12 @@ import traceback
 import uuid
 import warnings
 from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote
 
+from cryptography.fernet import Fernet, InvalidToken
 from pymongo import ReturnDocument, timeout as mongo_timeout
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
@@ -63,6 +67,9 @@ if os.path.isdir(_sdk_dir) and _sdk_dir not in sys.path:
 
 try:
     from payment_template import PaymentManager
+    from payment_template.config import AppConfig
+    from payment_template.gmail import GmailService
+    from payment_template.exceptions import ConfigurationError, GmailError
     _PM_AVAILABLE = True
 except ImportError as _pm_imp_err:
     _PM_AVAILABLE = False
@@ -70,29 +77,93 @@ except ImportError as _pm_imp_err:
 
 _pm_singleton = None
 _pm_config_key = None
+_pm_last_error = ""
 
-def _get_pm(*, default_upi_id: str | None = None,
-            default_payee_name: str | None = None):
-    """Return a PaymentManager configured for the current store settings."""
-    global _pm_singleton, _pm_config_key
-    requested_key = (default_upi_id or "", default_payee_name or "")
-    has_requested_config = bool(default_upi_id or default_payee_name)
-    if _pm_singleton is not None and (
-        not has_requested_config or requested_key == _pm_config_key
-    ):
-        return _pm_singleton
+def _payment_cipher():
+    # Reuses the bot's existing deployment secret, so setup needs no new env
+    # variable. Reconnect Gmail after rotating BOT_TOKEN.
+    key = hashlib.sha256(("hack-store-payment-settings::" + BOT_TOKEN).encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
+async def _payment_settings():
+    """Database settings take precedence; env remains a legacy fallback."""
+    upi = await db.get_setting("upi_id", "")
+    payee = await db.get_setting("global_brand_name", "")
+    mailbox = await db.get_setting("payment_imap_mailbox", "")
+    account = await db.get_setting("payment_gmail", None)
+    error = ""
+    if account is None:
+        username = os.getenv("IMAP_USERNAME", "").strip()
+        password = re.sub(r"\s+", "", os.getenv("IMAP_APP_PASSWORD", ""))
+    else:
+        username = account.get("username", "") if isinstance(account, dict) else ""
+        try:
+            password = _payment_cipher().decrypt(account["password_enc"].encode()).decode()
+        except (InvalidToken, KeyError, TypeError, AttributeError, ValueError):
+            password = ""
+            error = "Saved Gmail credentials could not be opened. Use Connect / Change Gmail again."
+    return {
+        "upi_id": upi or os.getenv("DEFAULT_UPI_ID", "").strip(),
+        "payee_name": payee or os.getenv("DEFAULT_PAYEE_NAME", "").strip() or "Hack Store",
+        "imap_username": username,
+        "imap_app_password": password,
+        "imap_mailbox": mailbox or os.getenv("IMAP_MAILBOX", "INBOX").strip() or "INBOX",
+        "credentials_error": error,
+    }
+
+
+def _payment_gmail_service(settings):
+    # Mailbox testing is independent of QR setup: admins may connect Gmail
+    # before configuring a UPI ID. Persistence fields are unused by Gmail.
+    return GmailService(AppConfig(
+        mongodb_uri="", db_name="", default_upi_id=settings["upi_id"],
+        imap_username=settings["imap_username"],
+        imap_app_password=settings["imap_app_password"],
+        imap_mailbox=settings["imap_mailbox"],
+        imap_host=os.getenv("IMAP_HOST", "imap.gmail.com").strip() or "imap.gmail.com",
+        imap_port=int(os.getenv("IMAP_PORT", "993") or "993"),
+    ))
+
+
+async def _get_pm(*, settings=None):
+    """Load the latest saved Gmail credentials for every payment operation."""
+    global _pm_singleton, _pm_config_key, _pm_last_error
     if not _PM_AVAILABLE:
+        _pm_last_error = "Payment SDK is unavailable. Check the installation."
         return None
     try:
-        _pm_singleton = PaymentManager(
-            default_upi_id=default_upi_id,
-            default_payee_name=default_payee_name,
+        settings = settings if settings is not None else await _payment_settings()
+        if settings["credentials_error"]:
+            _pm_last_error = settings["credentials_error"]
+            return None
+        cfg = AppConfig.from_env(
+            default_upi_id=settings["upi_id"],
+            default_payee_name=settings["payee_name"],
+            imap_username=settings["imap_username"],
+            imap_app_password=settings["imap_app_password"],
+            imap_mailbox=settings["imap_mailbox"],
         )
-        _pm_config_key = requested_key
+        _pm_last_error = ""
+        if _pm_singleton is not None and cfg == _pm_config_key:
+            return _pm_singleton
+        manager = PaymentManager(config=cfg)
+        if _pm_singleton is not None and (
+            cfg.mongodb_uri == _pm_config_key.mongodb_uri
+            and cfg.db_name == _pm_config_key.db_name
+        ):
+            # Reuse the same pool/indexes on a credential-only change. Existing
+            # verification threads keep their original Gmail configuration.
+            manager._repository = _pm_singleton._repository
+        _pm_singleton, _pm_config_key = manager, cfg
         logger.info("PaymentManager SDK initialized successfully.")
         return _pm_singleton
-    except Exception as e:
-        logger.error(f"Failed to initialize PaymentManager: {e}")
+    except ConfigurationError as exc:
+        _pm_last_error = str(exc)
+        return None
+    except Exception as exc:
+        _pm_last_error = "Unable to initialize payments. Test the connection or reconnect Gmail."
+        logger.error("PaymentManager initialization failed (%s).", type(exc).__name__)
         return None
 
 # ==============================================================================
@@ -365,7 +436,9 @@ def get_line(n: int = 12) -> str:
     WAIT_FOR_RESELLER_USER, WAIT_FOR_RESELLER_DAYS, WAIT_FOR_RESELLER_DISCOUNT,
     WAIT_FOR_ADD_FUND_AMT,
     WAIT_FOR_ADD_STAFF, WAIT_FOR_REM_STAFF,
-) = range(33)
+    WAIT_FOR_PAYMENT_EMAIL, WAIT_FOR_PAYMENT_PASSWORD,
+    WAIT_FOR_PAYMENT_PAYEE, WAIT_FOR_PAYMENT_MAILBOX,
+) = range(37)
 
 
 # ==============================================================================
@@ -570,6 +643,26 @@ def staff_required(func):
             parse_mode=ParseMode.HTML
         )
         return
+    return wrapper
+
+
+def payment_admin_required(func):
+    """Payment configuration is owner-only, including every message step."""
+    @wraps(func)
+    async def wrapper(update, context, *args, **kwargs):
+        if update.effective_user.id not in ADMIN_IDS:
+            if update.callback_query:
+                await update.callback_query.answer("Super Admin Only!", show_alert=True)
+            else:
+                await update.effective_message.reply_text("Only the bot owner can configure payments.")
+            return ConversationHandler.END
+        if update.effective_chat.type != "private":
+            if update.callback_query:
+                await update.callback_query.answer("Open the bot in private chat to configure payments.", show_alert=True)
+            else:
+                await update.effective_message.reply_text("Configure payments in a private chat with this bot.")
+            return ConversationHandler.END
+        return await func(update, context, *args, **kwargs)
     return wrapper
 
 
@@ -979,7 +1072,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             plan_id = int(data.split("_")[2])
             plan = await db.get_plan(plan_id)
 
-            admin_upi = await db.get_setting("upi_id", "")
+            admin_upi = await db.get_setting("upi_id", "") or os.getenv("DEFAULT_UPI_ID", "").strip()
             if not admin_upi or "@" not in admin_upi:
                 await safe_edit_text(
                     update, context,
@@ -997,10 +1090,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 price_paise = int(round(price_paise * (1 - (discount_perc / 100))))
 
             price_inr = price_paise / 100
-            payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
-
             # ── Try PaymentManager SDK first ──────────────────────────────────
-            pm = _get_pm(default_upi_id=admin_upi, default_payee_name=payee)
+            pm = await _get_pm()
             if pm:
                 try:
                     order = await asyncio.to_thread(pm.create, user_id=user_id, amount=price_inr)
@@ -1092,9 +1183,7 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                 return
 
             # ── Try PaymentManager SDK first ──────────────────────────────────
-            admin_upi = await db.get_setting("upi_id", "")
-            payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
-            pm = _get_pm(default_upi_id=admin_upi, default_payee_name=payee)
+            pm = await _get_pm()
             if pm:
                 try:
                     result = await asyncio.to_thread(pm.verify, order_id)
@@ -1113,12 +1202,13 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                             ref for ref in (utr, txn_id)
                             if ref and ref != "N/A"
                         }
-                        if any(
+                        used_references = [
                             await db.is_payment_reference_already_used(
                                 ref, except_order_id=order_id
                             )
                             for ref in references
-                        ):
+                        ]
+                        if any(used_references):
                             # Do not write the already-used reference onto
                             # this order: the unique replay index must remain
                             # owned by the original payment.
@@ -1793,73 +1883,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
 
         # ── UPI Session Management (PaymentManager SDK) ────────────────────
         elif data == "admin_svc_session":
-            await query.answer()
-            session_upi = await db.get_setting("upi_id", "")
-            session_payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
-            pm = _get_pm(
-                default_upi_id=session_upi,
-                default_payee_name=session_payee,
-            )
-            sdk_ok = pm is not None
-
-            # Gather status info
-            upi_id = "—"
-            gmail_user = "—"
-            gmail_ok = False
-            db_ok = False
-
-            if sdk_ok:
-                cfg = pm._config
-                upi_id = cfg.default_upi_id or "Not set"
-                gmail_user = cfg.imap_username or "Not set"
-
-                # Test Gmail IMAP
-                try:
-                    import imaplib
-                    _c = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
-                    _s, _ = _c.login(cfg.imap_username, cfg.imap_app_password)
-                    gmail_ok = (_s == "OK")
-                    _c.logout()
-                except Exception:
-                    gmail_ok = False
-
-                # Test MongoDB
-                try:
-                    pm._repository.db.client.server_info()
-                    db_ok = True
-                except Exception:
-                    db_ok = False
-
-            sdk_icon = ce('success') if sdk_ok else ce('fail')
-            sdk_label = "ACTIVE" if sdk_ok else "NOT INITIALIZED"
-            gmail_icon = ce('success') if gmail_ok else ce('fail')
-            gmail_label = "CONNECTED" if gmail_ok else "DISCONNECTED"
-            db_icon = ce('success') if db_ok else ce('fail')
-            db_label = "CONNECTED" if db_ok else "DISCONNECTED"
-
-            text = (
-                f"<blockquote><b>{ce('session')} UPI PAYMENT SESSION</b></blockquote>\n\n"
-                f"<b>PaymentManager SDK:</b> {sdk_icon} <b>{sdk_label}</b>\n"
-                f"<b>UPI ID:</b> <code>{upi_id}</code>\n"
-                f"<b>Gmail IMAP:</b> {gmail_icon} <b>{gmail_label}</b>\n"
-                f"  └ User: <code>{gmail_user}</code>\n"
-                f"<b>MongoDB:</b> {db_icon} <b>{db_label}</b>\n\n"
-            )
-
-            if not sdk_ok:
-                text += "<i>⚠️ PaymentManager SDK failed to initialize. Check DEFAULT_UPI_ID or the admin UPI setting, IMAP_USERNAME, IMAP_APP_PASSWORD, and MongoDB credentials.</i>"
-            elif not gmail_ok:
-                text += "<i>⚠️ Gmail IMAP connection failed. Payment verification may not work. Check IMAP credentials.</i>"
-            elif not db_ok:
-                text += "<i>⚠️ MongoDB connection failed. Orders cannot be saved. Check MONGO_URI/MONGODB_URI and the database name.</i>"
-            else:
-                text += "<i>✅ All systems operational. Payments will be verified automatically.</i>"
-
-            buttons = [
-                [InlineKeyboardButton("Refresh", callback_data="admin_svc_session", icon_custom_emoji_id=EMOJIS["loop"][1], style="primary")],
-                [InlineKeyboardButton("Back", callback_data="admin_main", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
-            ]
-            await safe_edit_text(update, context, text, InlineKeyboardMarkup(buttons))
+            await show_payment_session(update, context)
 
         # ── Products ───────────────────────────────────────────────────────────
         elif data == "admin_products":
@@ -2409,7 +2433,7 @@ async def receive_user_promo(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, amt: float):
     user_id = update.effective_user.id
-    admin_upi = await db.get_setting("upi_id", "")
+    admin_upi = await db.get_setting("upi_id", "") or os.getenv("DEFAULT_UPI_ID", "").strip()
 
     if not admin_upi:
         text = (
@@ -2422,11 +2446,10 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await update.message.reply_text(text, reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
         return
 
-    payee = await db.get_setting("global_brand_name", "Hack Store") or "Hack Store"
     chat_id = update.effective_chat.id
 
     # ── Try PaymentManager SDK first ──────────────────────────────────────
-    pm = _get_pm(default_upi_id=admin_upi, default_payee_name=payee)
+    pm = await _get_pm()
     if pm:
         try:
             order = await asyncio.to_thread(pm.create, user_id=user_id, amount=amt)
@@ -3031,7 +3054,237 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-@verification_required
+def payment_session_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Set UPI ID", callback_data="adm_set_upi"),
+         InlineKeyboardButton("Payee Name", callback_data="adm_payment_payee")],
+        [InlineKeyboardButton("Connect / Change Gmail", callback_data="adm_payment_gmail")],
+        [InlineKeyboardButton("Mailbox", callback_data="adm_payment_mailbox"),
+         InlineKeyboardButton("Test Connection / Refresh", callback_data="admin_svc_session")],
+        [InlineKeyboardButton("Back", callback_data="admin_main")],
+    ])
+
+
+async def _payment_reply(update, context, text, keyboard=None):
+    keyboard = keyboard if keyboard is not None else payment_session_kb()
+    if update.callback_query:
+        await safe_edit_text(update, context, text, keyboard)
+    else:
+        await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+
+async def _check_payment_gmail(settings):
+    if not _PM_AVAILABLE:
+        return False, "Payment SDK is unavailable. Check the installation."
+    if settings["credentials_error"]:
+        return False, settings["credentials_error"]
+    if not settings["imap_username"] or not settings["imap_app_password"]:
+        return False, "Use Connect / Change Gmail to save your Gmail address and App Password."
+    try:
+        await asyncio.to_thread(_payment_gmail_service(settings).check_connection)
+        return True, ""
+    except GmailError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        logger.warning("Gmail connection check failed (%s).", type(exc).__name__)
+        return False, "Gmail connection failed. Check the account, App Password and Mailbox, then retry."
+
+
+def _ping_payment_database():
+    """Check the bot's actual database connection without SDK side effects."""
+    with mongo_timeout(5):
+        db.db.command("ping")
+
+
+def _check_payment_storage(pm):
+    """Payment collections/indexes can fail while MongoDB stays connected."""
+    with mongo_timeout(5):
+        pm._repository.check_storage()
+
+
+@payment_admin_required
+async def show_payment_session(update, context, notice=""):
+    if update.callback_query:
+        await update.callback_query.answer("Checking payment configuration…")
+    try:
+        settings = await _payment_settings()
+        pm = await _get_pm(settings=settings)
+        sdk_error = _pm_last_error
+        gmail_ok, gmail_error = await _check_payment_gmail(settings)
+        try:
+            await asyncio.to_thread(_ping_payment_database)
+            database_ok = True
+        except Exception as exc:
+            logger.warning("Bot MongoDB connection check failed (%s).", type(exc).__name__)
+            database_ok = False
+        storage_ok = None
+        if pm is not None and database_ok:
+            try:
+                await asyncio.to_thread(_check_payment_storage, pm)
+                storage_ok = True
+            except Exception as exc:
+                logger.warning("Payment storage check failed (%s).", type(exc).__name__)
+                storage_ok = False
+    except Exception as exc:
+        logger.warning("Payment settings could not be loaded (%s).", type(exc).__name__)
+        await _payment_reply(update, context, "Payment settings could not be loaded. Please retry in a moment.")
+        return ConversationHandler.END
+
+    def status(ok, yes, no):
+        return f"{ce('success') if ok else ce('fail')} {yes if ok else no}"
+
+    text = (
+        f"<blockquote><b>{ce('session')} UPI PAYMENT SESSION</b></blockquote>\n\n"
+        f"<b>PaymentManager SDK:</b> {status(pm is not None, 'INITIALIZED', 'NOT INITIALIZED')}\n"
+        f"<b>UPI ID:</b> <code>{html.escape(settings['upi_id'] or 'Not set')}</code>\n"
+        f"<b>Payee:</b> {html.escape(settings['payee_name'])}\n"
+        f"<b>Gmail IMAP:</b> {status(gmail_ok, 'CONNECTED', 'DISCONNECTED')}\n"
+        f"└ User: <code>{html.escape(settings['imap_username'] or 'Not set')}</code>\n"
+        f"<b>App Password:</b> {'Saved' if settings['imap_app_password'] else 'Not set / reconnect required'}\n"
+        f"<b>Mailbox:</b> {html.escape(settings['imap_mailbox'])}\n"
+        f"<b>MongoDB:</b> {status(database_ok, 'CONNECTED', 'DISCONNECTED')}\n"
+        f"<b>Payment storage:</b> {status(storage_ok, 'READY', 'CHECK FAILED') if storage_ok is not None else 'NOT CHECKED'}\n\n"
+    )
+    if notice:
+        text += html.escape(notice) + "\n\n"
+    if not settings["upi_id"]:
+        text += "Set your receiving UPI ID below.\n"
+    if gmail_error:
+        text += html.escape(gmail_error) + "\n"
+    if pm is None and sdk_error and settings["upi_id"] and gmail_ok:
+        text += html.escape(sdk_error) + "\n"
+    if not database_ok:
+        text += "Bot database connection check failed. Check MongoDB connectivity.\n"
+    if storage_ok is False:
+        text += "Payment storage check failed. Check orders/verification_logs indexes and database permissions.\n"
+    if pm is not None and gmail_ok and database_ok and storage_ok:
+        text += "Ready for payment verification. Customers can use I'VE PAID after paying.\n"
+    text += "\nConfigure payment details using the buttons below. Changes apply without restarting the bot."
+    await _payment_reply(update, context, text)
+    return ConversationHandler.END
+
+
+@payment_admin_required
+async def prompt_payment_gmail(update, context):
+    context.user_data.pop("payment_setup_email", None)
+    await update.callback_query.answer()
+    await _payment_reply(update, context,
+        "<b>Connect Gmail — Step 1/2</b>\n\nSend the Gmail address that receives your FamPay/FamApp credit emails.",
+        cancel_kb())
+    return WAIT_FOR_PAYMENT_EMAIL
+
+
+@payment_admin_required
+async def receive_payment_email(update, context):
+    email = update.message.text.strip().lower()
+    if len(email) > 254 or not re.fullmatch(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+", email):
+        await _payment_reply(update, context, "Send a valid email address, for example name@gmail.com.", cancel_kb())
+        return WAIT_FOR_PAYMENT_EMAIL
+    context.user_data["payment_setup_email"] = email
+    await _payment_reply(update, context,
+        "<b>Connect Gmail — Step 2/2</b>\n\nSend the 16-letter Google App Password (spaces are OK). "
+        "Use an App Password, not your normal Gmail password.\n"
+        "Create one at https://myaccount.google.com/apppasswords with 2-Step Verification enabled.\n\n"
+        "The bot will test the login, delete your password message when possible, and save it encrypted.",
+        cancel_kb())
+    return WAIT_FOR_PAYMENT_PASSWORD
+
+
+@payment_admin_required
+async def receive_payment_password(update, context):
+    password = re.sub(r"\s+", "", update.message.text)
+    try:
+        await update.message.delete()
+    except TelegramError:
+        pass
+    email = context.user_data.get("payment_setup_email")
+    if not email:
+        await _payment_reply(update, context, "Setup was interrupted. Tap Connect / Change Gmail to start again.")
+        return ConversationHandler.END
+    if not re.fullmatch(r"[A-Za-z]{16}", password):
+        await _payment_reply(update, context, "Enter the 16-letter Google App Password. Spaces are allowed.", cancel_kb())
+        return WAIT_FOR_PAYMENT_PASSWORD
+    try:
+        settings = await _payment_settings()
+        settings.update(imap_username=email, imap_app_password=password, credentials_error="")
+        ok, error = await _check_payment_gmail(settings)
+        if not ok:
+            await _payment_reply(update, context,
+                "<b>Gmail connection failed.</b>\n" + html.escape(error) +
+                "\n\nSend another App Password or cancel. Your previous account is unchanged.", cancel_kb())
+            return WAIT_FOR_PAYMENT_PASSWORD
+        # One settings document makes the username/password change atomic.
+        await db.set_setting("payment_gmail", {
+            "username": email,
+            "password_enc": _payment_cipher().encrypt(password.encode()).decode(),
+        })
+    except Exception as exc:
+        logger.warning("Saving Gmail setup failed (%s).", type(exc).__name__)
+        await _payment_reply(update, context, "Gmail settings could not be saved. Please send the App Password again or cancel.", cancel_kb())
+        return WAIT_FOR_PAYMENT_PASSWORD
+    context.user_data.pop("payment_setup_email", None)
+    await db.log_admin_action(update.effective_user.id, "Updated Gmail payment account", "Credentials validated and saved")
+    return await show_payment_session(update, context, "Gmail connected and saved. Settings will survive a restart.")
+
+
+@payment_admin_required
+async def prompt_payment_payee(update, context):
+    await update.callback_query.answer()
+    await _payment_reply(update, context, "Send the payee/store name to display on payment QRs.", cancel_kb())
+    return WAIT_FOR_PAYMENT_PAYEE
+
+
+@payment_admin_required
+async def receive_payment_payee(update, context):
+    name = update.message.text.strip()
+    if not name or len(name) > 60 or not name.isprintable():
+        await _payment_reply(update, context, "Use a payee name between 1 and 60 characters on one line.", cancel_kb())
+        return WAIT_FOR_PAYMENT_PAYEE
+    try:
+        await db.set_setting("global_brand_name", name)
+    except Exception:
+        await _payment_reply(update, context, "Payee name could not be saved. Please try again.", cancel_kb())
+        return WAIT_FOR_PAYMENT_PAYEE
+    return await show_payment_session(update, context, "Payee name saved.")
+
+
+@payment_admin_required
+async def prompt_payment_mailbox(update, context):
+    await update.callback_query.answer()
+    await _payment_reply(update, context,
+        "Send the mailbox containing payment alerts. Usually <code>INBOX</code>; "
+        "for archived Gmail messages use <code>[Gmail]/All Mail</code>.", cancel_kb())
+    return WAIT_FOR_PAYMENT_MAILBOX
+
+
+@payment_admin_required
+async def receive_payment_mailbox(update, context):
+    mailbox = update.message.text.strip()
+    if not mailbox or len(mailbox) > 100 or not mailbox.isprintable():
+        await _payment_reply(update, context, "Send a mailbox name between 1 and 100 characters on one line.", cancel_kb())
+        return WAIT_FOR_PAYMENT_MAILBOX
+    try:
+        settings = await _payment_settings()
+        settings["imap_mailbox"] = mailbox
+        if settings["imap_username"] and settings["imap_app_password"]:
+            ok, error = await _check_payment_gmail(settings)
+            if not ok:
+                await _payment_reply(update, context, html.escape(error), cancel_kb())
+                return WAIT_FOR_PAYMENT_MAILBOX
+        await db.set_setting("payment_imap_mailbox", mailbox)
+    except Exception:
+        await _payment_reply(update, context, "Mailbox could not be saved. Please try again.", cancel_kb())
+        return WAIT_FOR_PAYMENT_MAILBOX
+    return await show_payment_session(update, context, "Mailbox saved.")
+
+
+@payment_admin_required
+async def cancel_payment_setup(update, context):
+    context.user_data.pop("payment_setup_email", None)
+    return await show_payment_session(update, context, "Setup cancelled.")
+
+
+@payment_admin_required
 async def prompt_set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -3042,14 +3295,19 @@ async def prompt_set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_FOR_SETTING_UPI
 
 
+@payment_admin_required
 async def receive_set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await db.set_setting("upi_id", update.message.text.strip())
+    upi = update.message.text.strip()
+    if len(upi) > 100 or not re.fullmatch(r"[A-Za-z0-9._-]+@[A-Za-z0-9.-]+", upi):
+        await _payment_reply(update, context, "Send a valid UPI ID, for example yourname@fam.", cancel_kb())
+        return WAIT_FOR_SETTING_UPI
+    try:
+        await db.set_setting("upi_id", upi)
+    except Exception:
+        await _payment_reply(update, context, "UPI ID could not be saved. Please try again.", cancel_kb())
+        return WAIT_FOR_SETTING_UPI
     await db.log_admin_action(update.effective_user.id, "Changed UPI", "Setting Updated")
-    await update.message.reply_text(
-        f"<blockquote>{ce('success')} <b>UPI ID Updated!</b></blockquote>",
-        reply_markup=await admin_menu_kb(update.effective_user.id), parse_mode=ParseMode.HTML,
-    )
-    return ConversationHandler.END
+    return await show_payment_session(update, context, "UPI ID saved.")
 
 
 @verification_required
@@ -3280,6 +3538,9 @@ def main(polling_lease=None):
             CallbackQueryHandler(prompt_add_staff, pattern="^adm_add_staff$"),
             CallbackQueryHandler(prompt_rem_staff, pattern="^adm_rem_staff$"),
             CallbackQueryHandler(prompt_set_upi, pattern="^adm_set_upi$"),
+            CallbackQueryHandler(prompt_payment_gmail, pattern="^adm_payment_gmail$"),
+            CallbackQueryHandler(prompt_payment_payee, pattern="^adm_payment_payee$"),
+            CallbackQueryHandler(prompt_payment_mailbox, pattern="^adm_payment_mailbox$"),
             CallbackQueryHandler(prompt_set_qr, pattern="^adm_set_qr$"),
             CallbackQueryHandler(prompt_set_sup, pattern="^adm_set_sup$"),
             CallbackQueryHandler(prompt_set_msg, pattern="^adm_set_msg$"),
@@ -3308,6 +3569,10 @@ def main(polling_lease=None):
         states={
             WAIT_FOR_BROADCAST:       [MessageHandler(~filters.COMMAND, receive_broadcast)],
             WAIT_FOR_SETTING_UPI:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_upi)],
+            WAIT_FOR_PAYMENT_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_email)],
+            WAIT_FOR_PAYMENT_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_password)],
+            WAIT_FOR_PAYMENT_PAYEE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_payee)],
+            WAIT_FOR_PAYMENT_MAILBOX: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_mailbox)],
             WAIT_FOR_SETTING_QR:      [MessageHandler(filters.PHOTO, receive_set_qr)],
             WAIT_FOR_SETTING_SUP:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_sup)],
             WAIT_FOR_SETTING_MSG:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_msg)],
@@ -3343,6 +3608,7 @@ def main(polling_lease=None):
 
         },
         fallbacks=[
+            CommandHandler("cancel", cancel_payment_setup),
             CallbackQueryHandler(cancel_conv_callback, pattern="^cancel_conv$"),
             CallbackQueryHandler(admin_nav_fallback, pattern="^(admin_|adm_)"),
         ],
