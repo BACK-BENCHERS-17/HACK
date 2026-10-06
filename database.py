@@ -129,42 +129,42 @@ class DatabaseManager:
     # Users
     # ------------------------------------------------------------------
     async def add_user(self, user_id: int, username: str, first_name: str,
-                 referrer_id: Optional[int] = None) -> bool:
+                  referrer_id: Optional[int] = None) -> bool:
         def _op():
-            existing = self.db.users.find_one({"_id": user_id})
             now_iso = datetime.now().isoformat()
-            if not existing:
-                self.db.users.insert_one({
-                    "_id": user_id,
-                    "user_id": user_id,
-                    "username": username,
-                    "first_name": first_name,
-                    "balance": 0,
-                    "joined_date": now_iso,
-                    "is_banned": 0,
-                    "verified": 0,
-                    "total_spent": 0,
-                    "referrer_id": referrer_id,
-                    "total_referrals": 0,
-                    "referral_earnings": 0,
-                    "last_active": now_iso,
-                })
-                if referrer_id:
-                    self.db.users.update_one(
-                        {"_id": referrer_id},
-                        {"$inc": {"total_referrals": 1}},
-                    )
-                return True
-            else:
-                self.db.users.update_one(
-                    {"_id": user_id},
-                    {"$set": {
+            result = self.db.users.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "user_id": user_id,
+                        "chat_id": user_id,
                         "username": username,
                         "first_name": first_name,
                         "last_active": now_iso,
-                    }},
+                    },
+                    "$setOnInsert": {
+                        "_id": user_id,
+                        "joined_date": now_iso,
+                        "balance": 0,
+                        "is_banned": 0,
+                        # Kept for compatibility with existing records; phone
+                        # verification is no longer required for bot access.
+                        "verified": 1,
+                        "total_spent": 0,
+                        "referrer_id": referrer_id,
+                        "total_referrals": 0,
+                        "referral_earnings": 0,
+                    },
+                },
+                upsert=True,
+            )
+            is_new = result.upserted_id is not None
+            if is_new and referrer_id:
+                self.db.users.update_one(
+                    {"_id": referrer_id},
+                    {"$inc": {"total_referrals": 1}},
                 )
-                return False
+            return is_new
         return await asyncio.to_thread(_op)
 
     async def get_user(self, user_id: int) -> dict:
@@ -188,12 +188,25 @@ class DatabaseManager:
                                 {"_id": user_id}, {"$set": {"verified": 1}})
 
     async def get_all_users_count(self) -> int:
-        return await asyncio.to_thread(self.db.users.count_documents, {"verified": 1})
+        return await asyncio.to_thread(self.db.users.count_documents, {})
 
-    async def get_all_verified_user_ids(self) -> List[int]:
+    async def get_all_user_ids(self) -> List[int]:
         def _op():
-            return [u["_id"] for u in self.db.users.find({"verified": 1}, {"_id": 1})]
+            users = self.db.users.find({}, {"_id": 1, "user_id": 1})
+            return list(dict.fromkeys(u.get("user_id") or u["_id"] for u in users))
         return await asyncio.to_thread(_op)
+
+    async def record_broadcast_result(self, user_id: int, status: str, error: str = ""):
+        """Persist the latest broadcast result for delivery diagnostics."""
+        await asyncio.to_thread(
+            self.db.users.update_one,
+            {"$or": [{"_id": user_id}, {"user_id": user_id}]},
+            {"$set": {
+                "last_broadcast_status": status,
+                "last_broadcast_error": error[:500],
+                "last_broadcast_at": datetime.now().isoformat(),
+            }},
+        )
 
     # ------------------------------------------------------------------
     # Staff / Sub-Admins
@@ -304,7 +317,7 @@ class DatabaseManager:
     async def get_leaderboard(self) -> List[dict]:
         def _op():
             cursor = self.db.users.find(
-                {"verified": 1, "total_spent": {"$gt": 0}},
+                {"total_spent": {"$gt": 0}},
                 {"first_name": 1, "total_spent": 1},
             ).sort("total_spent", DESCENDING).limit(10)
             return [{"first_name": d.get("first_name") or "User", "total_spent": d.get("total_spent", 0)} for d in cursor]
@@ -771,7 +784,7 @@ class DatabaseManager:
     # ------------------------------------------------------------------
     async def get_global_stats(self) -> Tuple[int, int, int, int]:
         def _op():
-            users = self.db.users.count_documents({"verified": 1})
+            users = self.db.users.count_documents({})
             agg = list(self.db.purchases.aggregate([{"$group": {"_id": None, "total": {"$sum": "$amount"}}}]))
             revenue = int(agg[0]["total"]) if agg else 0
             sold_keys = self.db.keys.count_documents({"is_sold": 1})

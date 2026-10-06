@@ -35,14 +35,11 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardRemove,
     LinkPreviewOptions,
     WebAppInfo,
 )
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import BadRequest, Conflict, NetworkError, TelegramError
+from telegram.error import BadRequest, Conflict, NetworkError, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     ExtBot,
@@ -587,9 +584,9 @@ async def qr_expiration_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==============================================================================
-# 6. UI HELPERS & VERIFICATION DECORATOR
+# 6. UI HELPERS & USER ACCESS DECORATOR
 # ==============================================================================
-def verification_required(func):
+def user_access_required(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id
 
@@ -610,13 +607,12 @@ def verification_required(func):
         if user_id in ADMIN_IDS:
             return await func(update, context, *args, **kwargs)
 
+        await db.add_user(
+            user_id,
+            update.effective_user.username,
+            update.effective_user.first_name,
+        )
         user = await db.get_user(user_id)
-        if not user:
-            await show_verification_prompt(update, context)
-            return
-        if not user.get("verified", 0):
-            await show_verification_prompt(update, context)
-            return
         if user.get("is_banned", 0):
             await update.effective_message.reply_text(
                 f"<blockquote>{ce('poop')} <b>ACCOUNT BANNED</b>\nContact Admin to appeal.</blockquote>",
@@ -664,89 +660,6 @@ def payment_admin_required(func):
             return ConversationHandler.END
         return await func(update, context, *args, **kwargs)
     return wrapper
-
-
-async def show_verification_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[KeyboardButton("📱 Share Phone Number", request_contact=True)]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    text = (
-        f"<blockquote><b>{ce('warning')} VERIFICATION REQUIRED {ce('warning')}</b></blockquote>\n\n"
-        f"<i>To use Hack Store safely, please verify your account by sharing your phone number.</i>\n"
-        f"<b>We use this to prevent spam and maintain a secure environment.</b>\n\n"
-        f"{ce('down')} <b>Click the button below to verify:</b>"
-    )
-    if update.callback_query:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id, text=text,
-            reply_markup=reply_markup, parse_mode=ParseMode.HTML,
-        )
-    else:
-        await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-
-
-async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact = update.message.contact
-    user_id = update.effective_user.id
-
-    await db.add_user(user_id, update.effective_user.username, update.effective_user.first_name)
-
-    user = await db.get_user(user_id)
-    if user and user.get("verified", 0):
-        await update.message.reply_text(
-            f"<blockquote>{ce('success')} You are already verified.</blockquote>",
-            reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.HTML,
-        )
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-        return
-
-    await db.verify_user(user_id)
-
-    try:
-        phone_number = contact.phone_number
-        first_name = contact.first_name
-        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
-        photo_id = (
-            photos.photos[0][-1].file_id if photos.total_count > 0
-            else await db.get_setting("default_pfp")
-        )
-        username = update.effective_user.username
-        username_text = f"@{username}" if username else "N/A"
-
-        admin_msg = (
-            f"<blockquote><b>{ce('siren')} NEW VERIFIED USER {ce('siren')}</b></blockquote>\n\n"
-            f"{ce('name_icon')} <b>Name:</b> <a href='tg://user?id={user_id}'>{first_name}</a>\n"
-            f"{ce('link')} <b>Username:</b> {username_text}\n"
-            f"{ce('memo')} <b>User ID:</b> <code>{user_id}</code>\n"
-            f"{ce('contact')} <b>Phone:</b> <code>{phone_number}</code>\n"
-            f"{get_line(12)}"
-        )
-        for admin in ADMIN_IDS:
-            try:
-                await context.bot.send_photo(
-                    chat_id=admin, photo=photo_id, caption=admin_msg, parse_mode=ParseMode.HTML,
-                )
-            except Exception:
-                pass
-    except Exception as e:
-        logger.error(f"Error in contact_handler admin alert: {e}")
-
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-    await update.message.reply_text(
-        f"<blockquote>{ce('success')} <b>Verification successful! Welcome to Hack Store.</b></blockquote>",
-        reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.HTML,
-    )
-
-    user = await db.get_user(user_id)
-    bal = user.get("balance", 0) / 100
-    welcome_text = _welcome_text(bal)
-    await update.message.reply_text(welcome_text, reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
 
 
 def _welcome_text(bal: float) -> str:
@@ -914,6 +827,61 @@ async def safe_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # ==============================================================================
 # 8. USER HANDLERS
 # ==============================================================================
+async def notify_new_member(context: ContextTypes.DEFAULT_TYPE, user, member_count: int):
+    """Send a premium new-member alert to every configured admin."""
+    user_id = user.id
+    first_name = html.escape(user.first_name or "Telegram User")
+    username = user.username
+    username_text = f"@{html.escape(username)}" if username else "Not set"
+    alert_text = (
+        f"<blockquote><b>{ce('siren')} NEW MEMBER JOINED {ce('siren')}</b></blockquote>\n\n"
+        f"{ce('name_icon')} <b>Name:</b> "
+        f"<a href='tg://user?id={user_id}'><b>{first_name}</b></a>\n"
+        f"{ce('link')} <b>Username:</b> <code>{username_text}</code>\n"
+        f"{ce('memo')} <b>User ID:</b> <code>{user_id}</code>\n"
+        f"{ce('user')} <b>Total Members:</b> <b>{member_count}</b>\n"
+        f"{get_line(12)}\n"
+        f"<i>{ce('success')} Joined successfully and can use the bot without phone verification.</i>"
+    )
+
+    photo_id = None
+    try:
+        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count > 0:
+            photo_id = photos.photos[0][-1].file_id
+        else:
+            photo_id = await db.get_setting("default_pfp", "")
+    except Exception:
+        pass
+
+    for admin_id in ADMIN_IDS:
+        try:
+            if photo_id:
+                await context.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=photo_id,
+                    caption=alert_text,
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=alert_text,
+                    parse_mode=ParseMode.HTML,
+                )
+        except Exception:
+            # A missing/invalid profile photo must not prevent a text alert.
+            if photo_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=alert_text,
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     referrer_id = None
@@ -926,6 +894,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     is_new = await db.add_user(user.id, user.username, user.first_name, referrer_id)
+    if is_new:
+        try:
+            member_count = await db.get_all_users_count()
+            await notify_new_member(context, user, member_count)
+        except Exception as exc:
+            logger.warning("New-member admin notification failed (%s).", type(exc).__name__)
+
     if is_new and referrer_id:
         try:
             alert_text = (
@@ -944,10 +919,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
         )
         return
-    if not user_data.get("verified", 0):
-        await show_verification_prompt(update, context)
-        return
-
     is_maintenance = await db.get_setting("maintenance_mode", "0")
     if is_maintenance == "1" and user.id not in ADMIN_IDS:
         await update.message.reply_text(
@@ -961,7 +932,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(_welcome_text(bal), reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML)
 
 
-@verification_required
+@user_access_required
 async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -2266,7 +2237,7 @@ async def receive_add_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         await update.message.reply_text(
             f"<blockquote>{ce('fail')} <b>User not found in database!</b></blockquote>\n\n"
-            f"Please ensure the user has started the bot and is verified.",
+            f"Please ensure the user has started the bot.",
             reply_markup=cancel_kb(), parse_mode=ParseMode.HTML
         )
         return WAIT_FOR_ADD_STAFF
@@ -2336,7 +2307,7 @@ async def receive_rem_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── User conversations ─────────────────────────────────────────────────────────
-@verification_required
+@user_access_required
 async def prompt_add_funds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     text = (
@@ -2356,7 +2327,7 @@ async def prompt_add_funds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END # We will handle buttons via callback query
 
 
-@verification_required
+@user_access_required
 async def prompt_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -2391,7 +2362,7 @@ async def receive_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-@verification_required
+@user_access_required
 async def prompt_user_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -2620,7 +2591,7 @@ async def receive_custom_desc(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
-@verification_required
+@user_access_required
 async def prompt_edit_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     p_id = int(update.callback_query.data.split("_")[3])
@@ -2699,7 +2670,7 @@ async def receive_edit_prod_desc(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
 
-@verification_required
+@user_access_required
 async def prompt_set_dl_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -2943,20 +2914,85 @@ async def prompt_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_FOR_BROADCAST
 
 
+async def _broadcast_operation(context, operation, uid, msg):
+    """Run one Telegram broadcast operation and retry a rate-limit response."""
+    for attempt in range(2):
+        try:
+            if operation == "forward":
+                await context.bot.forward_message(
+                    chat_id=uid,
+                    from_chat_id=msg.chat_id,
+                    message_id=msg.message_id,
+                )
+            else:
+                await context.bot.copy_message(
+                    chat_id=uid,
+                    from_chat_id=msg.chat_id,
+                    message_id=msg.message_id,
+                )
+            return True, ""
+        except RetryAfter as exc:
+            if attempt:
+                return False, f"Telegram rate limit after retry ({exc})"
+            await asyncio.sleep(min(float(exc.retry_after), 30.0))
+        except Exception as exc:
+            return False, str(exc)
+    return False, "Telegram delivery failed after retry"
+
+
+def _broadcast_recipient_blocked(error: str) -> bool:
+    lowered = error.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "forbidden",
+            "deactivated",
+            "blocked",
+            "chat not found",
+            "user is deactivated",
+            "voice_messages_forbidden",
+        )
+    )
+
+
+async def _deliver_broadcast_message(context, msg, uid, is_forwarded):
+    """Deliver one broadcast and classify inactive users separately."""
+    if is_forwarded:
+        sent, forward_error = await _broadcast_operation(context, "forward", uid, msg)
+        if sent:
+            return "sent", ""
+        if _broadcast_recipient_blocked(forward_error):
+            return "blocked", forward_error
+
+        sent, copy_error = await _broadcast_operation(context, "copy", uid, msg)
+        if sent:
+            return "sent", ""
+        error = f"Forward: {forward_error} | Copy: {copy_error}"
+    else:
+        sent, error = await _broadcast_operation(context, "copy", uid, msg)
+        if sent:
+            return "sent", ""
+
+    if _broadcast_recipient_blocked(error):
+        return "blocked", error
+    return "failed", error
+
+
 @staff_required
 async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
         return ConversationHandler.END
 
-    user_ids = await db.get_all_verified_user_ids()
+    user_ids = await db.get_all_user_ids()
     total = len(user_ids)
     if total == 0:
-        await msg.reply_text(f"{ce('fail')} No verified users to broadcast to.", parse_mode=ParseMode.HTML)
+        await msg.reply_text(f"{ce('fail')} No users to broadcast to.", parse_mode=ParseMode.HTML)
         return ConversationHandler.END
 
     sent, failed, blocked = 0, 0, 0
     last_error = "None"
+    failure_samples = []
     status_msg = await msg.reply_text(f"{ce('broadcast')} <b>Broadcast starting for {total} users...</b>", parse_mode=ParseMode.HTML)
     
     # Ultra-safe forward detection
@@ -2971,51 +3007,28 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_time = time.time()
     
     for i, uid in enumerate(user_ids):
-        success = False
         try:
-            if is_forwarded:
-                try:
-                    await context.bot.forward_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
-                    success = True
-                except Exception as e:
-                    err_s = str(e).lower()
-                    if any(x in err_s for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
-                        blocked += 1
-                        continue
-                    try:
-                        await context.bot.copy_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
-                        success = True
-                    except Exception as e2:
-                        err_s2 = str(e2).lower()
-                        if any(x in err_s2 for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
-                            blocked += 1
-                        else:
-                            last_error = f"Fwd: {str(e)} | Copy: {str(e2)}"
-            else:
-                try:
-                    await context.bot.copy_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
-                    success = True
-                except Exception as e:
-                    err_s = str(e).lower()
-                    if any(x in err_s for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
-                        blocked += 1
-                    else:
-                        last_error = f"Copy: {str(e)}"
+            delivery_status, delivery_error = await _deliver_broadcast_message(
+                context, msg, uid, is_forwarded,
+            )
+        except Exception as exc:
+            delivery_status = "failed"
+            delivery_error = f"Unexpected broadcast error: {exc}"
 
-            if success:
-                sent += 1
-            else:
-                # If not a known block/forbidden error, count as failed
-                curr_err = str(last_error).lower()
-                if not any(x in curr_err for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
-                    failed += 1
-        except Exception as e:
-            err_s = str(e).lower()
-            if any(x in err_s for x in ["forbidden", "deactivated", "blocked", "voice_messages_forbidden"]):
-                blocked += 1
-            else:
-                last_error = f"Outer: {str(e)}"
-                failed += 1
+        try:
+            await db.record_broadcast_result(uid, delivery_status.upper(), delivery_error)
+        except Exception as exc:
+            logger.warning("Could not save broadcast result for user %s (%s).", uid, type(exc).__name__)
+
+        if delivery_status == "sent":
+            sent += 1
+        elif delivery_status == "blocked":
+            blocked += 1
+        else:
+            failed += 1
+            last_error = delivery_error or "Unknown Telegram delivery error"
+            if len(failure_samples) < 5:
+                failure_samples.append(f"{uid}: {last_error}")
         
         # Update progress every 5 users
         if (i + 1) % 5 == 0 or (i + 1) == total:
@@ -3045,7 +3058,11 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{ce('user')} <b>Total Target:</b> {total}</blockquote>"
     )
     if failed > 0:
-        final_text += f"\n\n<b>LAST TECHNICAL ERROR:</b>\n<code>{last_error[:200]}</code>"
+        final_text += f"\n\n<b>LAST TECHNICAL ERROR:</b>\n<code>{html.escape(last_error[:200])}</code>"
+        if failure_samples:
+            final_text += "\n\n<b>FAILED USER SAMPLES:</b>\n<code>" + html.escape(
+                "\n".join(failure_samples)
+            ) + "</code>"
 
     await status_msg.edit_text(
         final_text,
@@ -3310,7 +3327,7 @@ async def receive_set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await show_payment_session(update, context, "UPI ID saved.")
 
 
-@verification_required
+@user_access_required
 async def prompt_set_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -3333,7 +3350,7 @@ async def receive_set_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-@verification_required
+@user_access_required
 async def prompt_set_sup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -3354,7 +3371,7 @@ async def receive_set_sup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-@verification_required
+@user_access_required
 async def prompt_set_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -3375,7 +3392,7 @@ async def receive_set_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-@verification_required
+@user_access_required
 async def prompt_manual_bal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -3386,7 +3403,7 @@ async def prompt_manual_bal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_FOR_MANUAL_BAL_USER
 
 
-@verification_required
+@user_access_required
 async def prompt_reseller_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -3440,7 +3457,7 @@ async def receive_manual_bal_amt(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 
-@verification_required
+@user_access_required
 async def prompt_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -3465,7 +3482,7 @@ async def receive_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-@verification_required
+@user_access_required
 async def prompt_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await safe_edit_text(
@@ -3527,8 +3544,6 @@ def main(polling_lease=None):
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", cmd_admin))
-    app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
-
     # ── Admin conversation handler ─────────────────────────────────────────────
     admin_conv = ConversationHandler(
         entry_points=[

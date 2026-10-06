@@ -43,6 +43,9 @@ remain optional environment fallbacks for older deployments; saved bot settings
 take precedence. An App Password is required for Gmail IMAP, not a normal
 Google account password.
 
+Users can start and use the bot without sharing a phone number. Account bans
+and maintenance mode are still enforced.
+
 ## Render deployment
 
 The supplied `render.yaml` defines a **Web Service** with:
