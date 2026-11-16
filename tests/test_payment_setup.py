@@ -138,6 +138,8 @@ class PaymentSetupTests(unittest.IsolatedAsyncioTestCase):
         handlers = [
             bot.show_payment_session, bot.prompt_payment_gmail, bot.receive_payment_email,
             bot.receive_payment_password, bot.prompt_set_upi, bot.receive_set_upi,
+            bot.prompt_razorpay_key_id, bot.receive_razorpay_key_id,
+            bot.receive_razorpay_key_secret,
             bot.prompt_payment_payee, bot.receive_payment_payee,
             bot.prompt_payment_mailbox, bot.receive_payment_mailbox, bot.cancel_payment_setup,
         ]
@@ -259,6 +261,21 @@ class PaymentSetupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(changed["imap_app_password"], "")
                 self.assertIn("Connect / Change Gmail", changed["credentials_error"])
 
+    async def test_razorpay_credentials_are_decrypted_and_gateway_is_read(self):
+        secret = "razorpaysecret123"
+        await self.manager.set_setting("razorpay_credentials", {
+            "key_id": "rzp_test_id123",
+            "key_secret_enc": bot._payment_cipher().encrypt(secret.encode()).decode(),
+        })
+        await self.manager.set_setting("payment_gateway", "razorpay")
+
+        settings = await bot._payment_settings()
+
+        self.assertEqual(settings["payment_gateway"], "razorpay")
+        self.assertEqual(settings["razorpay_key_id"], "rzp_test_id123")
+        self.assertEqual(settings["razorpay_key_secret"], secret)
+        self.assertNotIn(secret, str(await self.manager.get_setting("razorpay_credentials")))
+
     async def test_env_fallback_is_preserved_until_account_is_saved(self):
         with patch.dict(os.environ, {
             "IMAP_USERNAME": "env@gmail.com", "IMAP_APP_PASSWORD": "abcd efgh ijkl mnop",
@@ -354,6 +371,15 @@ class PaymentSetupTests(unittest.IsolatedAsyncioTestCase):
             await bot.handle_user_callbacks(request, self.context)
         self.assertEqual((await self.manager.get_user(123))["balance"], 1250)
         self.assertEqual((await self.manager.get_fund_request_by_order(order.id))["status"], "APPROVED")
+
+    async def test_fund_request_keeps_the_gateway_used_at_creation(self):
+        created = await self.manager.create_fund_request_with_order(
+            1, "qr_test", None, 1000, "FUND", payment_gateway="razorpay"
+        )
+
+        self.assertTrue(created)
+        request = await self.manager.get_fund_request_by_order("qr_test")
+        self.assertEqual(request["payment_gateway"], "razorpay")
 
     async def test_bot_rejects_duplicate_reference_before_wallet_credit(self):
         await self.manager.add_user(1, "test_user", "Test User")

@@ -30,13 +30,13 @@ from urllib.parse import quote
 from cryptography.fernet import Fernet, InvalidToken
 from pymongo import ReturnDocument, timeout as mongo_timeout
 from pymongo.errors import DuplicateKeyError, PyMongoError
+import razorpay_checkout
 
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     LinkPreviewOptions,
-    WebAppInfo,
 )
 from telegram.constants import ParseMode, ChatAction
 from telegram.error import BadRequest, Conflict, NetworkError, RetryAfter, TelegramError
@@ -89,6 +89,8 @@ async def _payment_settings():
     payee = await db.get_setting("global_brand_name", "")
     mailbox = await db.get_setting("payment_imap_mailbox", "")
     account = await db.get_setting("payment_gmail", None)
+    razorpay_account = await db.get_setting("razorpay_credentials", None)
+    gateway = await db.get_setting("payment_gateway", "fam")
     error = ""
     if account is None:
         username = os.getenv("IMAP_USERNAME", "").strip()
@@ -100,14 +102,41 @@ async def _payment_settings():
         except (InvalidToken, KeyError, TypeError, AttributeError, ValueError):
             password = ""
             error = "Saved Gmail credentials could not be opened. Use Connect / Change Gmail again."
+    razorpay_key_id = ""
+    razorpay_key_secret = ""
+    razorpay_error = ""
+    if isinstance(razorpay_account, dict):
+        stored_key_id = razorpay_account.get("key_id")
+        if isinstance(stored_key_id, str):
+            razorpay_key_id = stored_key_id
+        else:
+            razorpay_error = "Saved Razorpay credentials are incomplete. Reconnect Razorpay."
+        try:
+            razorpay_key_secret = _payment_cipher().decrypt(
+                razorpay_account["key_secret_enc"].encode()
+            ).decode()
+        except (InvalidToken, KeyError, TypeError, AttributeError, ValueError):
+            razorpay_key_id = ""
+            razorpay_error = "Saved Razorpay credentials could not be opened. Reconnect Razorpay."
+    if gateway not in ("fam", "razorpay"):
+        gateway = "fam"
     return {
         "upi_id": upi or os.getenv("DEFAULT_UPI_ID", "").strip(),
         "payee_name": payee or os.getenv("DEFAULT_PAYEE_NAME", "").strip() or "Hack Store",
+        "payment_gateway": gateway,
         "imap_username": username,
         "imap_app_password": password,
         "imap_mailbox": mailbox or os.getenv("IMAP_MAILBOX", "INBOX").strip() or "INBOX",
         "credentials_error": error,
+        "razorpay_key_id": razorpay_key_id,
+        "razorpay_key_secret": razorpay_key_secret,
+        "razorpay_credentials_error": razorpay_error,
     }
+
+
+async def _active_payment_gateway():
+    gateway = await db.get_setting("payment_gateway", "fam")
+    return gateway if gateway in ("fam", "razorpay") else "fam"
 
 
 def _payment_gmail_service(settings):
@@ -436,6 +465,7 @@ def get_line(n: int = 12) -> str:
     WAIT_FOR_PAYMENT_EMAIL, WAIT_FOR_PAYMENT_PASSWORD,
     WAIT_FOR_PAYMENT_PAYEE, WAIT_FOR_PAYMENT_MAILBOX,
 ) = range(37)
+WAIT_FOR_RAZORPAY_KEY_ID, WAIT_FOR_RAZORPAY_KEY_SECRET = range(37, 39)
 
 
 # ==============================================================================
@@ -446,6 +476,7 @@ db = DatabaseManager()
 DEFAULT_SETTINGS = {
     "qr_image": None,
     "upi_id": "",
+    "payment_gateway": "fam",
     "support_user": "@YourSupportHandle",
     "unauth_msg": (
         f"<blockquote><b>{ce('angry')} Aukaat mein reh! {ce('fail')}</b></blockquote>\n\n"
@@ -550,6 +581,105 @@ def generate_order_id(plan_id: int, user_id: int) -> str:
     return f"HACK-{plan_id}-{user_id}-{unique}"
 
 
+async def _close_razorpay_qr_best_effort(order_id, key_id, key_secret):
+    try:
+        await asyncio.to_thread(
+            razorpay_checkout.close_qr_code, order_id, key_id, key_secret
+        )
+    except Exception as exc:
+        logger.warning("Closing unsent Razorpay QR failed (%s).", type(exc).__name__)
+
+
+async def _send_razorpay_qr(context, *, user_id, amount_paise, plan_id, order_type):
+    settings = await _payment_settings()
+    if settings["razorpay_credentials_error"]:
+        raise razorpay_checkout.PaymentConfigurationError
+    key_id = settings["razorpay_key_id"]
+    key_secret = settings["razorpay_key_secret"]
+    if not key_id or not key_secret:
+        raise razorpay_checkout.PaymentConfigurationError
+
+    description = (
+        f"{'Wallet top-up' if order_type == 'FUND' else 'Store purchase'} for user {user_id}"
+    )
+    qr = await asyncio.to_thread(
+        razorpay_checkout.create_qr_code,
+        amount_paise,
+        key_id,
+        key_secret,
+        settings["payee_name"],
+        description,
+    )
+    order_id = qr["id"]
+    try:
+        stored = await db.create_fund_request_with_order(
+            user_id,
+            order_id,
+            plan_id,
+            amount_paise,
+            order_type,
+            payment_gateway="razorpay",
+        )
+    except Exception:
+        await _close_razorpay_qr_best_effort(order_id, key_id, key_secret)
+        raise
+    if not stored:
+        await _close_razorpay_qr_best_effort(order_id, key_id, key_secret)
+        raise RuntimeError("The Razorpay payment request could not be saved.")
+
+    amount = amount_paise / 100
+    qr_photo = io.BytesIO(qr["image"])
+    qr_photo.name = f"{order_id}.png"
+    if order_type == "FUND":
+        caption = (
+            f"<blockquote><b>{ce('money')} ADD FUNDS — ₹{amount:.2f}</b></blockquote>\n\n"
+            "Scan this Razorpay QR to add money to your wallet.\n"
+            f"<i>{ce('warning')} QR expires in 15 minutes.</i>\n"
+            f"<code>QR ID: {html.escape(order_id)}</code>"
+        )
+        cancel_callback = "user_main"
+        buttons = [
+            [InlineKeyboardButton("I'VE PAID", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["success"][1], style="success")],
+            [InlineKeyboardButton("Cancel", callback_data=cancel_callback, icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+        ]
+    else:
+        caption = (
+            f"<blockquote><b>{ce('card')} SCAN &amp; PAY ₹{amount:.2f}</b></blockquote>\n\n"
+            "Scan this Razorpay QR using any UPI app.\n"
+            f"<i>{ce('warning')} QR expires in 15 minutes.</i>\n"
+            f"<i>{ce('success')} Tap I'VE PAID after completing payment.</i>\n"
+            f"<code>QR ID: {html.escape(order_id)}</code>"
+        )
+        buttons = [
+            [InlineKeyboardButton("I'VE PAID", callback_data=f"verify_pay_{order_id}", icon_custom_emoji_id=EMOJIS["success"][1], style="success")],
+            [InlineKeyboardButton("Generate New QR", callback_data=f"gen_qr_{plan_id}", icon_custom_emoji_id=EMOJIS["refresh"][1], style="primary")],
+            [InlineKeyboardButton("Cancel", callback_data=f"buy_plan_{plan_id}", icon_custom_emoji_id=EMOJIS["back"][1], style="danger")],
+        ]
+
+    try:
+        message = await context.bot.send_photo(
+            chat_id=user_id,
+            photo=qr_photo,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        try:
+            await db.update_fund_request_by_order(order_id, "CANCELLED")
+        except Exception as exc:
+            logger.warning("Cancelling unsent Razorpay request failed (%s).", type(exc).__name__)
+        await _close_razorpay_qr_best_effort(order_id, key_id, key_secret)
+        raise
+
+    context.job_queue.run_once(
+        qr_expiration_job,
+        when=900,
+        data={"chat_id": user_id, "message_id": message.message_id, "order_id": order_id},
+    )
+    return message
+
+
 async def qr_expiration_job(context: ContextTypes.DEFAULT_TYPE):
     """Job to delete an expired QR message and notify the user."""
     job = context.job
@@ -563,6 +693,48 @@ async def qr_expiration_job(context: ContextTypes.DEFAULT_TYPE):
         "APPROVED", "PAID", "PAID_NO_STOCK", "PROCESSING",
     }:
         return
+
+    if req and req.get("payment_gateway") == "razorpay":
+        settings = await _payment_settings()
+        if (
+            not settings["razorpay_key_id"]
+            or not settings["razorpay_key_secret"]
+            or settings["razorpay_credentials_error"]
+        ):
+            logger.warning("Cannot expire Razorpay QR because credentials are unavailable.")
+            return
+        try:
+            result = await asyncio.to_thread(
+                razorpay_checkout.verify_qr_payment,
+                order_id,
+                int(req.get("amount_requested", 0)),
+                settings["razorpay_key_id"],
+                settings["razorpay_key_secret"],
+            )
+            if result.get("verified"):
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Razorpay received this payment. Tap I'VE PAID on the QR message to complete your order.",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            await asyncio.to_thread(
+                razorpay_checkout.close_qr_code,
+                order_id,
+                settings["razorpay_key_id"],
+                settings["razorpay_key_secret"],
+            )
+        except Exception as exc:
+            logger.warning("Razorpay QR expiry check failed (%s).", type(exc).__name__)
+            retries = int(job.data.get("expiry_retries", 0))
+            if retries < 5:
+                context.job_queue.run_once(
+                    qr_expiration_job,
+                    when=60,
+                    data={**job.data, "expiry_retries": retries + 1},
+                )
+            return
+        await db.update_fund_request_by_order(order_id, "EXPIRED")
 
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -700,12 +872,8 @@ def _get_keypad_kb(current_val: str):
     return kb
 
 
-def main_menu_kb(web_app_url: str = None) -> InlineKeyboardMarkup:
+def main_menu_kb() -> InlineKeyboardMarkup:
     buttons = []
-    
-    # Add Web Store button if URL is provided (Telegram requires HTTPS for WebApp buttons)
-    if web_app_url and web_app_url.startswith("https://"):
-        buttons.append([InlineKeyboardButton("OPEN WEB STORE", web_app=WebAppInfo(url=web_app_url), icon_custom_emoji_id=EMOJIS["rocket"][1], style="primary")])
 
     buttons.extend([
         [InlineKeyboardButton("BUY HACK", callback_data="user_buy_hack", icon_custom_emoji_id=EMOJIS["cart"][1], style="primary"),
@@ -1043,6 +1211,50 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             plan_id = int(data.split("_")[2])
             plan = await db.get_plan(plan_id)
 
+            # Check for reseller discount. Keep the payable amount in paise as
+            # an integer through the order and database layers.
+            price_paise = int(plan['price'])
+            is_reseller, discount_perc = await db.is_active_reseller(user_id)
+            if is_reseller:
+                price_paise = int(round(price_paise * (1 - (discount_perc / 100))))
+
+            if await _active_payment_gateway() == "razorpay":
+                try:
+                    await _send_razorpay_qr(
+                        context,
+                        user_id=user_id,
+                        amount_paise=price_paise,
+                        plan_id=plan_id,
+                        order_type="PRODUCT",
+                    )
+                    try:
+                        await query.message.delete()
+                    except TelegramError:
+                        pass
+                except razorpay_checkout.PaymentConfigurationError:
+                    await safe_edit_text(
+                        update, context,
+                        f"<blockquote>{ce('fail')} <b>Razorpay is not configured.</b>\n"
+                        "Ask the admin to connect Razorpay in /admin → UPI Session.</blockquote>",
+                        back_kb("user_buy_hack"),
+                    )
+                except razorpay_checkout.PaymentAuthenticationError:
+                    await safe_edit_text(
+                        update, context,
+                        f"<blockquote>{ce('fail')} <b>Razorpay credentials were rejected.</b>\n"
+                        "Ask the admin to check the Razorpay API keys.</blockquote>",
+                        back_kb("user_buy_hack"),
+                    )
+                except Exception as exc:
+                    logger.warning("Razorpay product QR creation failed (%s).", type(exc).__name__)
+                    await safe_edit_text(
+                        update, context,
+                        f"<blockquote>{ce('fail')} <b>Razorpay QR generation failed.</b>\n"
+                        "Please try again or contact support.</blockquote>",
+                        back_kb("user_buy_hack"),
+                    )
+                return
+
             admin_upi = await db.get_setting("upi_id", "") or os.getenv("DEFAULT_UPI_ID", "").strip()
             if not admin_upi or "@" not in admin_upi:
                 await safe_edit_text(
@@ -1052,13 +1264,6 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
                     back_kb("user_buy_hack"),
                 )
                 return
-
-            # Check for reseller discount. Keep the payable amount in paise as
-            # an integer through the order and database layers.
-            price_paise = int(plan['price'])
-            is_reseller, discount_perc = await db.is_active_reseller(user_id)
-            if is_reseller:
-                price_paise = int(round(price_paise * (1 - (discount_perc / 100))))
 
             price_inr = price_paise / 100
             # ── Try PaymentManager SDK first ──────────────────────────────────
@@ -1071,7 +1276,8 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 
                     # Store fund_request in DB with PENDING status (Paise)
                     stored = await db.create_fund_request_with_order(
-                        user_id, order_id, plan_id, price_paise, "PRODUCT"
+                        user_id, order_id, plan_id, price_paise, "PRODUCT",
+                        payment_gateway="fam",
                     )
                     if not stored:
                         try:
@@ -1149,17 +1355,56 @@ async def handle_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             }:
                 await query.answer("This payment was already processed.", show_alert=True)
                 return
+            if current_status in {"EXPIRED", "CANCELLED"}:
+                await query.answer("This QR has expired. Generate a new QR to pay.", show_alert=True)
+                return
             if current_status == "PROCESSING":
                 await query.answer("Payment is already being processed. Please wait.", show_alert=True)
                 return
 
-            # ── Try PaymentManager SDK first ──────────────────────────────────
-            pm = await _get_pm()
-            if pm:
+            gateway = req.get("payment_gateway", "fam")
+            if gateway not in ("fam", "razorpay"):
+                gateway = "fam"
+            pm = None
+            result = None
+            if gateway == "razorpay":
+                settings = await _payment_settings()
+                if (
+                    not settings["razorpay_key_id"]
+                    or not settings["razorpay_key_secret"]
+                    or settings["razorpay_credentials_error"]
+                ):
+                    await query.answer(
+                        "Razorpay credentials are unavailable. Contact the admin.",
+                        show_alert=True,
+                    )
+                    return
                 try:
-                    result = await asyncio.to_thread(pm.verify, order_id)
-                    logger.info(f"PM verify result for order={order_id}: verified={result.get('verified')} status={result.get('status')}")
+                    result = await asyncio.to_thread(
+                        razorpay_checkout.verify_qr_payment,
+                        order_id,
+                        int(req.get("amount_requested", 0)),
+                        settings["razorpay_key_id"],
+                        settings["razorpay_key_secret"],
+                    )
+                except Exception as exc:
+                    logger.warning("Razorpay payment verification failed (%s).", type(exc).__name__)
+                    await query.answer(
+                        "Razorpay could not be reached. Please try verification again.",
+                        show_alert=True,
+                    )
+                    return
+            else:
+                pm = await _get_pm()
 
+            if pm or result is not None:
+                try:
+                    if result is None:
+                        result = await asyncio.to_thread(pm.verify, order_id)
+                    logger.info(
+                        "Payment verify result for gateway=%s order=%s verified=%s status=%s",
+                        gateway, order_id, result.get("verified"), result.get("status"),
+                    )
                     if result.get("verified") and result.get("status") == "verified":
                         # Payment verified via PM — proceed with key delivery
                         utr = result.get("utr", "N/A")
@@ -1685,7 +1930,7 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
     super_only = [
         "admin_products", "admin_keys", "admin_users", "admin_pending_payments",
         "admin_resellers", "admin_settings", "adm_maintenance", "admin_svc_session",
-        "adm_export_db", "admin_staff_list",
+        "adm_gateway_", "adm_export_db", "admin_staff_list",
     ]
     
     if any(data.startswith(s) for s in super_only) and user_id not in ADMIN_IDS:
@@ -1855,6 +2100,21 @@ async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         # ── UPI Session Management (PaymentManager SDK) ────────────────────
         elif data == "admin_svc_session":
             await show_payment_session(update, context)
+
+        elif data == "adm_gateway_fam":
+            await db.set_setting("payment_gateway", "fam")
+            await db.log_admin_action(user_id, "Changed payment gateway", "FamPay selected")
+            await show_payment_session(update, context, "FamPay is now the only active payment gateway.")
+
+        elif data == "adm_gateway_razorpay":
+            settings = await _payment_settings()
+            if not settings["razorpay_key_id"] or not settings["razorpay_key_secret"] \
+                    or settings["razorpay_credentials_error"]:
+                await query.answer("Connect and validate Razorpay credentials first.", show_alert=True)
+                return
+            await db.set_setting("payment_gateway", "razorpay")
+            await db.log_admin_action(user_id, "Changed payment gateway", "Razorpay selected")
+            await show_payment_session(update, context, "Razorpay is now the only active payment gateway.")
 
         # ── Products ───────────────────────────────────────────────────────────
         elif data == "admin_products":
@@ -2404,6 +2664,42 @@ async def receive_user_promo(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, amt: float):
     user_id = update.effective_user.id
+    gateway = await _active_payment_gateway()
+    if gateway == "razorpay":
+        try:
+            await _send_razorpay_qr(
+                context,
+                user_id=user_id,
+                amount_paise=int(round(amt * 100)),
+                plan_id=None,
+                order_type="FUND",
+            )
+            if update.callback_query:
+                try:
+                    await update.callback_query.message.delete()
+                except TelegramError:
+                    pass
+        except razorpay_checkout.PaymentConfigurationError:
+            text = "Razorpay credentials are not configured. Ask the admin to connect Razorpay."
+            if update.callback_query:
+                await safe_edit_text(update, context, text, main_menu_kb())
+            else:
+                await update.message.reply_text(text, reply_markup=main_menu_kb())
+        except razorpay_checkout.PaymentAuthenticationError:
+            text = "Razorpay rejected the saved API keys. Ask the admin to check them."
+            if update.callback_query:
+                await safe_edit_text(update, context, text, main_menu_kb())
+            else:
+                await update.message.reply_text(text, reply_markup=main_menu_kb())
+        except Exception as exc:
+            logger.warning("Razorpay wallet QR creation failed (%s).", type(exc).__name__)
+            text = "Razorpay QR generation failed. Please try again or contact support."
+            if update.callback_query:
+                await safe_edit_text(update, context, text, main_menu_kb())
+            else:
+                await update.message.reply_text(text, reply_markup=main_menu_kb())
+        return
+
     admin_upi = await db.get_setting("upi_id", "") or os.getenv("DEFAULT_UPI_ID", "").strip()
 
     if not admin_upi:
@@ -2428,7 +2724,8 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             expires_at = order.expires_at.strftime("%d %b %Y, %I:%M %p IST")
 
             stored = await db.create_fund_request_with_order(
-                user_id, order_id, None, int(round(amt * 100)), "FUND"
+                user_id, order_id, None, int(round(amt * 100)), "FUND",
+                payment_gateway="fam",
             )
             if not stored:
                 try:
@@ -2483,7 +2780,7 @@ async def _process_add_fund(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def receive_add_fund_amt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amt = float(update.message.text.strip())
-        if amt < 1: raise ValueError
+        if not math.isfinite(amt) or amt < 1: raise ValueError
     except:
         await update.message.reply_text("Please enter a valid amount (minimum ₹1).", reply_markup=cancel_kb())
         return WAIT_FOR_ADD_FUND_AMT
@@ -3073,6 +3370,9 @@ async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def payment_session_kb():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Use FamPay", callback_data="adm_gateway_fam"),
+         InlineKeyboardButton("Use Razorpay", callback_data="adm_gateway_razorpay")],
+        [InlineKeyboardButton("Connect / Change Razorpay API Keys", callback_data="adm_payment_razorpay")],
         [InlineKeyboardButton("Set UPI ID", callback_data="adm_set_upi"),
          InlineKeyboardButton("Payee Name", callback_data="adm_payment_payee")],
         [InlineKeyboardButton("Connect / Change Gmail", callback_data="adm_payment_gmail")],
@@ -3125,9 +3425,12 @@ async def show_payment_session(update, context, notice=""):
         await update.callback_query.answer("Checking payment configuration…")
     try:
         settings = await _payment_settings()
-        pm = await _get_pm(settings=settings)
+        pm = await _get_pm(settings=settings) if settings["payment_gateway"] == "fam" else None
         sdk_error = _pm_last_error
-        gmail_ok, gmail_error = await _check_payment_gmail(settings)
+        if settings["payment_gateway"] == "fam":
+            gmail_ok, gmail_error = await _check_payment_gmail(settings)
+        else:
+            gmail_ok, gmail_error = False, ""
         try:
             await asyncio.to_thread(_ping_payment_database)
             database_ok = True
@@ -3150,12 +3453,19 @@ async def show_payment_session(update, context, notice=""):
     def status(ok, yes, no):
         return f"{ce('success') if ok else ce('fail')} {yes if ok else no}"
 
+    razorpay_saved = bool(
+        settings["razorpay_key_id"]
+        and settings["razorpay_key_secret"]
+        and not settings["razorpay_credentials_error"]
+    )
     text = (
-        f"<blockquote><b>{ce('session')} UPI PAYMENT SESSION</b></blockquote>\n\n"
-        f"<b>PaymentManager SDK:</b> {status(pm is not None, 'INITIALIZED', 'NOT INITIALIZED')}\n"
+        f"<blockquote><b>{ce('session')} PAYMENT GATEWAYS</b></blockquote>\n\n"
+        f"<b>Active gateway:</b> <code>{'FamPay' if settings['payment_gateway'] == 'fam' else 'Razorpay'}</code>\n"
+        f"<b>FamPay SDK:</b> {status(pm is not None, 'INITIALIZED', 'NOT INITIALIZED') if settings['payment_gateway'] == 'fam' else 'INACTIVE'}\n"
+        f"<b>Razorpay QR:</b> {status(razorpay_saved, 'ACTIVE' if settings['payment_gateway'] == 'razorpay' else 'SAVED', 'NOT CONFIGURED')}\n"
         f"<b>UPI ID:</b> <code>{html.escape(settings['upi_id'] or 'Not set')}</code>\n"
         f"<b>Payee:</b> {html.escape(settings['payee_name'])}\n"
-        f"<b>Gmail IMAP:</b> {status(gmail_ok, 'CONNECTED', 'DISCONNECTED')}\n"
+        f"<b>Gmail IMAP:</b> {status(gmail_ok, 'CONNECTED', 'DISCONNECTED') if settings['payment_gateway'] == 'fam' else 'INACTIVE'}\n"
         f"└ User: <code>{html.escape(settings['imap_username'] or 'Not set')}</code>\n"
         f"<b>App Password:</b> {'Saved' if settings['imap_app_password'] else 'Not set / reconnect required'}\n"
         f"<b>Mailbox:</b> {html.escape(settings['imap_mailbox'])}\n"
@@ -3164,9 +3474,9 @@ async def show_payment_session(update, context, notice=""):
     )
     if notice:
         text += html.escape(notice) + "\n\n"
-    if not settings["upi_id"]:
+    if settings["payment_gateway"] == "fam" and not settings["upi_id"]:
         text += "Set your receiving UPI ID below.\n"
-    if gmail_error:
+    if settings["payment_gateway"] == "fam" and gmail_error:
         text += html.escape(gmail_error) + "\n"
     if pm is None and sdk_error and settings["upi_id"] and gmail_ok:
         text += html.escape(sdk_error) + "\n"
@@ -3174,8 +3484,12 @@ async def show_payment_session(update, context, notice=""):
         text += "Bot database connection check failed. Check MongoDB connectivity.\n"
     if storage_ok is False:
         text += "Payment storage check failed. Check orders/verification_logs indexes and database permissions.\n"
-    if pm is not None and gmail_ok and database_ok and storage_ok:
-        text += "Ready for payment verification. Customers can use I'VE PAID after paying.\n"
+    if settings["razorpay_credentials_error"]:
+        text += html.escape(settings["razorpay_credentials_error"]) + "\n"
+    if settings["payment_gateway"] == "fam" and pm is not None and gmail_ok and database_ok and storage_ok:
+        text += "Ready for payment verification. FamPay is active; Razorpay will not be used for new payments.\n"
+    elif settings["payment_gateway"] == "razorpay" and razorpay_saved:
+        text += "Razorpay is active and ready. FamPay will not be used for new payments.\n"
     text += "\nConfigure payment details using the buttons below. Changes apply without restarting the bot."
     await _payment_reply(update, context, text)
     return ConversationHandler.END
@@ -3189,6 +3503,97 @@ async def prompt_payment_gmail(update, context):
         "<b>Connect Gmail — Step 1/2</b>\n\nSend the Gmail address that receives your FamPay/FamApp credit emails.",
         cancel_kb())
     return WAIT_FOR_PAYMENT_EMAIL
+
+
+@payment_admin_required
+async def prompt_razorpay_key_id(update, context):
+    context.user_data.pop("razorpay_setup_key_id", None)
+    await update.callback_query.answer()
+    await _payment_reply(
+        update,
+        context,
+        "Send the Razorpay Key ID (starts with <code>rzp_test_</code> or <code>rzp_live_</code>).",
+        cancel_kb(),
+    )
+    return WAIT_FOR_RAZORPAY_KEY_ID
+
+
+@payment_admin_required
+async def receive_razorpay_key_id(update, context):
+    key_id = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except TelegramError:
+        pass
+    if not re.fullmatch(r"rzp_(?:test|live)_[A-Za-z0-9]+", key_id):
+        await _payment_reply(update, context, "That Key ID format is invalid. Send the Razorpay Key ID again.", cancel_kb())
+        return WAIT_FOR_RAZORPAY_KEY_ID
+    context.user_data["razorpay_setup_key_id"] = key_id
+    await _payment_reply(
+        update,
+        context,
+        "Now send the matching Razorpay Key Secret. The message will be deleted and the secret stored encrypted.",
+        cancel_kb(),
+    )
+    return WAIT_FOR_RAZORPAY_KEY_SECRET
+
+
+@payment_admin_required
+async def receive_razorpay_key_secret(update, context):
+    key_secret = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except TelegramError:
+        pass
+    key_id = context.user_data.get("razorpay_setup_key_id")
+    if not key_id:
+        await _payment_reply(update, context, "Setup was interrupted. Start Connect / Change Razorpay API Keys again.")
+        return ConversationHandler.END
+    if not re.fullmatch(r"[A-Za-z0-9]{8,128}", key_secret):
+        await _payment_reply(update, context, "That Key Secret format is invalid. Send the matching secret again.", cancel_kb())
+        return WAIT_FOR_RAZORPAY_KEY_SECRET
+
+    try:
+        await asyncio.to_thread(
+            razorpay_checkout.validate_credentials, key_id, key_secret
+        )
+    except razorpay_checkout.PaymentAuthenticationError:
+        await _payment_reply(
+            update,
+            context,
+            "Razorpay rejected these credentials. The previously saved credentials are unchanged.",
+            cancel_kb(),
+        )
+        return WAIT_FOR_RAZORPAY_KEY_SECRET
+    except razorpay_checkout.PaymentConfigurationError:
+        await _payment_reply(update, context, "Both Razorpay API keys are required.", cancel_kb())
+        return WAIT_FOR_RAZORPAY_KEY_SECRET
+    except razorpay_checkout.PaymentProviderError:
+        await _payment_reply(
+            update,
+            context,
+            "Could not validate Razorpay QR API access. Check network access and QR Code API permissions; existing credentials are unchanged.",
+            cancel_kb(),
+        )
+        return WAIT_FOR_RAZORPAY_KEY_SECRET
+
+    try:
+        await db.set_setting("razorpay_credentials", {
+            "key_id": key_id,
+            "key_secret_enc": _payment_cipher().encrypt(key_secret.encode()).decode(),
+        })
+    except Exception as exc:
+        logger.warning("Saving Razorpay credentials failed (%s).", type(exc).__name__)
+        await _payment_reply(update, context, "Razorpay credentials could not be saved. Please try again.", cancel_kb())
+        return WAIT_FOR_RAZORPAY_KEY_SECRET
+
+    context.user_data.pop("razorpay_setup_key_id", None)
+    await db.log_admin_action(
+        update.effective_user.id,
+        "Updated Razorpay credentials",
+        "Credentials validated and saved encrypted",
+    )
+    return await show_payment_session(update, context, "Razorpay credentials validated and saved encrypted.")
 
 
 @payment_admin_required
@@ -3298,6 +3703,7 @@ async def receive_payment_mailbox(update, context):
 @payment_admin_required
 async def cancel_payment_setup(update, context):
     context.user_data.pop("payment_setup_email", None)
+    context.user_data.pop("razorpay_setup_key_id", None)
     return await show_payment_session(update, context, "Setup cancelled.")
 
 
@@ -3554,6 +3960,7 @@ def main(polling_lease=None):
             CallbackQueryHandler(prompt_rem_staff, pattern="^adm_rem_staff$"),
             CallbackQueryHandler(prompt_set_upi, pattern="^adm_set_upi$"),
             CallbackQueryHandler(prompt_payment_gmail, pattern="^adm_payment_gmail$"),
+            CallbackQueryHandler(prompt_razorpay_key_id, pattern="^adm_payment_razorpay$"),
             CallbackQueryHandler(prompt_payment_payee, pattern="^adm_payment_payee$"),
             CallbackQueryHandler(prompt_payment_mailbox, pattern="^adm_payment_mailbox$"),
             CallbackQueryHandler(prompt_set_qr, pattern="^adm_set_qr$"),
@@ -3586,6 +3993,8 @@ def main(polling_lease=None):
             WAIT_FOR_SETTING_UPI:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_set_upi)],
             WAIT_FOR_PAYMENT_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_email)],
             WAIT_FOR_PAYMENT_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_password)],
+            WAIT_FOR_RAZORPAY_KEY_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_razorpay_key_id)],
+            WAIT_FOR_RAZORPAY_KEY_SECRET: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_razorpay_key_secret)],
             WAIT_FOR_PAYMENT_PAYEE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_payee)],
             WAIT_FOR_PAYMENT_MAILBOX: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payment_mailbox)],
             WAIT_FOR_SETTING_QR:      [MessageHandler(filters.PHOTO, receive_set_qr)],

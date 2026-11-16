@@ -10,6 +10,17 @@ bash start.sh
 Set `BOT_TOKEN`, `ADMIN_IDS`, and `MONGO_URI` in your deployment's environment.
 The database defaults to `hack_store_enterprise`; set `MONGO_DB_NAME` to override it.
 
+## In-bot payment gateways
+
+In the private chat, open `/admin → UPI Session` to choose **one active
+gateway**: FamPay or Razorpay. To use Razorpay, choose **Connect / Change
+Razorpay API Keys**, send the Key ID followed by its Key Secret, then choose
+**Use Razorpay**. The keys are validated against the QR API, stored encrypted
+in MongoDB, and the secret message is deleted when Telegram permits. Razorpay
+sends a fixed-amount, single-use QR directly in the bot chat; payment status is
+checked with Razorpay before adding wallet funds or delivering a key. Existing
+pending payments continue to use the gateway saved on their payment request.
+
 ## Configure payments directly in the bot
 
 In a **private chat**, the owner opens **`/admin → UPI Session`**:

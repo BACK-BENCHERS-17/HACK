@@ -542,7 +542,8 @@ class DatabaseManager:
     # ------------------------------------------------------------------
     async def create_fund_request_with_order(self, user_id: int, order_id: str,
                                        plan_id: int, amount: float,
-                                       order_type: Optional[str] = None) -> bool:
+                                       order_type: Optional[str] = None,
+                                       payment_gateway: str = "fam") -> bool:
         def _op():
             if self.db.fund_requests.find_one({"order_id": order_id}): return False
             try:
@@ -555,6 +556,7 @@ class DatabaseManager:
                     "_id": next_f_doc["seq"], "user_id": user_id, "order_id": order_id,
                     "plan_id": int(plan_id) if plan_id is not None else None,
                     "order_type": order_type or ("FUND" if plan_id is None else "PRODUCT"),
+                    "payment_gateway": payment_gateway,
                     "amount_requested": amount_paise,
                     "sender_name": None, "payment_time": None, "status": "PENDING",
                     "request_date": datetime.now().isoformat(), "resolved_date": None,
